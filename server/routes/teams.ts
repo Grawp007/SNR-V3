@@ -8,18 +8,18 @@ import logger from '../lib/logger.js';
 const router = Router();
 
 // GET /api/teams — admin sees all, others see their teams
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
 
   let teams;
   if (authReq.user.role === 'admin') {
-    teams = db.prepare(`
+    teams = await db.prepare(`
       SELECT t.*, (SELECT COUNT(*) FROM team_members WHERE team_id = t.id) as member_count
       FROM teams t ORDER BY t.name
     `).all();
   } else {
-    teams = db.prepare(`
+    teams = await db.prepare(`
       SELECT t.*, (SELECT COUNT(*) FROM team_members WHERE team_id = t.id) as member_count
       FROM teams t JOIN team_members tm ON t.id = tm.team_id
       WHERE tm.user_id = ? ORDER BY t.name
@@ -37,7 +37,7 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // POST /api/teams — admin only
-router.post('/', requireRole('admin'), (req: Request, res: Response) => {
+router.post('/', requireRole('admin'), async (req: Request, res: Response) => {
   const { name, description } = req.body;
   if (!name?.trim()) {
     res.status(400).json({ error: 'Team name is required' });
@@ -48,14 +48,14 @@ router.post('/', requireRole('admin'), (req: Request, res: Response) => {
   const id = crypto.randomUUID();
   const now = Date.now();
 
-  db.prepare('INSERT INTO teams (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+  await db.prepare('INSERT INTO teams (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
     .run(id, name.trim(), description?.trim() || '', now, now);
 
   res.status(201).json({ id, name: name.trim(), description: description?.trim() || '', createdAt: now, memberCount: 0 });
 });
 
 // GET /api/teams/:id — team detail + members (members or admin)
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const teamId = req.params.id;
@@ -66,7 +66,7 @@ router.get('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as {
+  const team = (await db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId)) as {
     id: string; name: string; description: string; created_at: number; updated_at: number;
   } | undefined;
   if (!team) {
@@ -74,11 +74,11 @@ router.get('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const members = db.prepare(`
+  const members = (await db.prepare(`
     SELECT u.id as user_id, u.email, u.display_name, u.role as user_role, tm.role as team_role, tm.joined_at
     FROM team_members tm JOIN users u ON tm.user_id = u.id
     WHERE tm.team_id = ? ORDER BY tm.joined_at
-  `).all(teamId) as Array<{
+  `).all(teamId)) as Array<{
     user_id: string; email: string; display_name: string; user_role: string; team_role: string; joined_at: number;
   }>;
 
@@ -100,14 +100,14 @@ router.get('/:id', (req: Request, res: Response) => {
 });
 
 // PATCH /api/teams/:id — update team (admin or team lead)
-router.patch('/:id', (req: Request, res: Response) => {
+router.patch('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const teamId = req.params.id;
 
   // Check admin or team lead
   if (authReq.user.role !== 'admin') {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Requires admin or team lead role' });
       return;
@@ -118,12 +118,12 @@ router.patch('/:id', (req: Request, res: Response) => {
   let updated = false;
 
   if (req.body.name !== undefined) {
-    db.prepare('UPDATE teams SET name = ?, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE teams SET name = ?, updated_at = ? WHERE id = ?')
       .run(req.body.name.trim(), now, teamId);
     updated = true;
   }
   if (req.body.description !== undefined) {
-    db.prepare('UPDATE teams SET description = ?, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE teams SET description = ?, updated_at = ? WHERE id = ?')
       .run(req.body.description.trim(), now, teamId);
     updated = true;
   }
@@ -137,31 +137,31 @@ router.patch('/:id', (req: Request, res: Response) => {
 });
 
 // DELETE /api/teams/:id — admin only, must have zero sessions
-router.delete('/:id', requireRole('admin'), (req: Request, res: Response) => {
+router.delete('/:id', requireRole('admin'), async (req: Request, res: Response) => {
   const db = getDb();
   const teamId = req.params.id;
 
-  const sessionCount = (db.prepare('SELECT COUNT(*) as c FROM sessions WHERE team_id = ?').get(teamId) as { c: number }).c;
+  const sessionCount = ((await db.prepare('SELECT COUNT(*) as c FROM sessions WHERE team_id = ?').get(teamId)) as { c: number }).c;
   if (sessionCount > 0) {
     res.status(409).json({ error: `Cannot delete team with ${sessionCount} session(s). Reassign or delete sessions first.` });
     return;
   }
 
-  db.prepare('DELETE FROM teams WHERE id = ?').run(teamId);
+  await db.prepare('DELETE FROM teams WHERE id = ?').run(teamId);
   res.json({ ok: true });
 });
 
 // ── Member management ────────────────────────────────────────────────────
 
 // POST /api/teams/:id/members — add member (admin or team lead)
-router.post('/:id/members', (req: Request, res: Response) => {
+router.post('/:id/members', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const teamId = req.params.id;
 
   // Check admin or team lead
   if (authReq.user.role !== 'admin') {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Requires admin or team lead role' });
       return;
@@ -182,31 +182,31 @@ router.post('/:id/members', (req: Request, res: Response) => {
   }
 
   // Verify user exists
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
+  const user = await db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
   if (!user) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
 
   // Check if already a member
-  const existing = db.prepare('SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, userId);
+  const existing = await db.prepare('SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, userId);
   if (existing) {
     res.status(409).json({ error: 'User is already a member of this team' });
     return;
   }
 
-  db.prepare('INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)').run(teamId, userId, teamRole, Date.now());
+  await db.prepare('INSERT INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)').run(teamId, userId, teamRole, Date.now());
   res.status(201).json({ ok: true });
 });
 
 // PATCH /api/teams/:id/members/:userId — change team role
-router.patch('/:id/members/:userId', (req: Request, res: Response) => {
+router.patch('/:id/members/:userId', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const { id: teamId, userId } = req.params;
 
   if (authReq.user.role !== 'admin') {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Requires admin or team lead role' });
       return;
@@ -219,7 +219,7 @@ router.patch('/:id/members/:userId', (req: Request, res: Response) => {
     return;
   }
 
-  const result = db.prepare('UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?').run(role, teamId, userId);
+  const result = await db.prepare('UPDATE team_members SET role = ? WHERE team_id = ? AND user_id = ?').run(role, teamId, userId);
   if (result.changes === 0) {
     res.status(404).json({ error: 'Membership not found' });
     return;
@@ -228,41 +228,41 @@ router.patch('/:id/members/:userId', (req: Request, res: Response) => {
 });
 
 // DELETE /api/teams/:id/members/:userId — remove member
-router.delete('/:id/members/:userId', (req: Request, res: Response) => {
+router.delete('/:id/members/:userId', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const { id: teamId, userId } = req.params;
 
   if (authReq.user.role !== 'admin') {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Requires admin or team lead role' });
       return;
     }
   }
 
-  db.prepare('DELETE FROM team_members WHERE team_id = ? AND user_id = ?').run(teamId, userId);
+  await db.prepare('DELETE FROM team_members WHERE team_id = ? AND user_id = ?').run(teamId, userId);
   res.json({ ok: true });
 });
 
 // ── Team settings ────────────────────────────────────────────────────────
 
 // GET /api/teams/:id/settings — merged settings (global + team overrides)
-router.get('/:id/settings', requireTeamMember, (req: Request, res: Response) => {
+router.get('/:id/settings', requireTeamMember, async (req: Request, res: Response) => {
   const teamId = req.params.id;
-  const merged = loadMergedSettings(teamId);
+  const merged = await loadMergedSettings(teamId);
   res.json(merged);
 });
 
 // PATCH /api/teams/:id/settings — update team-level setting overrides
-router.patch('/:id/settings', (req: Request, res: Response) => {
+router.patch('/:id/settings', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const teamId = req.params.id;
 
   // Check admin or team lead
   if (authReq.user.role !== 'admin') {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?').get(teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Requires admin or team lead role' });
       return;
@@ -274,7 +274,7 @@ router.patch('/:id/settings', (req: Request, res: Response) => {
 
   for (const [key, value] of Object.entries(updates)) {
     if (typeof value !== 'string') continue;
-    db.prepare('INSERT OR REPLACE INTO team_settings (team_id, key, value, updated_at) VALUES (?, ?, ?, ?)').run(teamId, key, value, now);
+    await db.prepare('INSERT INTO team_settings (team_id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at').run(teamId, key, value, now);
   }
 
   res.json({ ok: true });

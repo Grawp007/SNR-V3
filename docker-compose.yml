@@ -1,27 +1,51 @@
-# SNR — on-prem deployment.
+# SNR V3 — on-prem deployment.
 #   1. Copy .env.example → .env and set JWT_SECRET, ALLOWED_ORIGINS, an LLM key,
-#      and A2N_ADMIN_EMAIL / A2N_ADMIN_PASSWORD (first-run admin bootstrap).
+#      POSTGRES_PASSWORD, and A2N_ADMIN_EMAIL / A2N_ADMIN_PASSWORD (first-run admin).
 #   2. Set SNR_DOMAIN in .env (or edit deploy/Caddyfile) for TLS.
 #   3. docker compose up -d
 #
 # The `app` container serves the API + built UI on :3001 (internal). `caddy`
-# terminates TLS and reverse-proxies to it. To front SNR with your OWN proxy
-# instead, remove the caddy service and publish app's port directly.
+# terminates TLS and reverse-proxies to it. `postgres` is the V3 data store. To
+# front SNR with your OWN proxy instead, remove the caddy service and publish
+# app's port directly.
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-snr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-snr}
+    volumes:
+      - snr-pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-snr} -d ${POSTGRES_DB:-snr}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   app:
     build: .
-    image: snr:latest
+    image: snr-v3:latest
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file: .env
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3001
-      DB_PATH: /data/snr.db
+      # Postgres connection. Compose injects the password from .env.
+      DATABASE_URL: postgres://${POSTGRES_USER:-snr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snr}
+      BACKUP_DIR: /data/backups
       # Behind the caddy proxy → trust 1 hop for real client IPs / rate limiting
       TRUST_PROXY: "1"
     volumes:
-      - snr-data:/data          # SQLite DB + scheduled backups persist here
+      - snr-data:/data          # scheduled pg_dump backups persist here
     expose:
       - "3001"
     healthcheck:
@@ -47,6 +71,7 @@ services:
       - caddy-config:/config
 
 volumes:
+  snr-pgdata:
   snr-data:
   caddy-data:
   caddy-config:

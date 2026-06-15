@@ -24,7 +24,7 @@ export interface AuthenticatedRequest extends Request {
  * Verify JWT from Authorization header and attach user to request.
  * Returns 401 if token is missing, invalid, or user is disabled.
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required' });
@@ -45,36 +45,41 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
-  // Check token revocation blacklist (indexed lookup)
-  if (payload.jti && isTokenRevoked(payload.jti)) {
-    res.status(401).json({ error: 'Token has been revoked' });
-    return;
+  try {
+    // Check token revocation blacklist (indexed lookup)
+    if (payload.jti && (await isTokenRevoked(payload.jti))) {
+      res.status(401).json({ error: 'Token has been revoked' });
+      return;
+    }
+
+    const db = getDb();
+    const user = (await db.prepare(
+      'SELECT id, email, display_name, role, disabled FROM users WHERE id = ?'
+    ).get(payload.sub)) as { id: string; email: string; display_name: string; role: string; disabled: number } | undefined;
+
+    if (!user || user.disabled) {
+      res.status(401).json({ error: 'Account not found or disabled' });
+      return;
+    }
+
+    // Load team memberships
+    const teams = (await db.prepare(
+      'SELECT team_id FROM team_members WHERE user_id = ?'
+    ).all(user.id)) as Array<{ team_id: string }>;
+
+    (req as AuthenticatedRequest).user = {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+      role: user.role as AuthUser['role'],
+      teamIds: teams.map(t => t.team_id),
+    };
+
+    next();
+  } catch (err) {
+    logger.error({ err }, 'Auth middleware database error');
+    res.status(503).json({ error: 'Service temporarily unavailable' });
   }
-
-  const db = getDb();
-  const user = db.prepare(
-    'SELECT id, email, display_name, role, disabled FROM users WHERE id = ?'
-  ).get(payload.sub) as { id: string; email: string; display_name: string; role: string; disabled: number } | undefined;
-
-  if (!user || user.disabled) {
-    res.status(401).json({ error: 'Account not found or disabled' });
-    return;
-  }
-
-  // Load team memberships
-  const teams = db.prepare(
-    'SELECT team_id FROM team_members WHERE user_id = ?'
-  ).all(user.id) as Array<{ team_id: string }>;
-
-  (req as AuthenticatedRequest).user = {
-    id: user.id,
-    email: user.email,
-    displayName: user.display_name,
-    role: user.role as AuthUser['role'],
-    teamIds: teams.map(t => t.team_id),
-  };
-
-  next();
 }
 
 /**

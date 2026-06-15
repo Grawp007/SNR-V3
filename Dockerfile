@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
 # ── Builder: install all deps and build the frontend ──────────────────────────
-# node:sqlite requires Node ≥ 22.5; node:22-bookworm-slim ships the latest 22.x.
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -13,14 +12,29 @@ FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     PORT=3001 \
     HOST=0.0.0.0 \
-    DB_PATH=/data/snr.db
+    BACKUP_DIR=/data/backups
 WORKDIR /app
+
+# postgresql-client-16 (pg_dump / pg_restore) for scheduled backups & restore.
+# Installed from the PGDG repo so the client major matches the Postgres 16 server
+# (Debian bookworm ships only client 15, which refuses to dump a v16 server).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && apt-get purge -y curl gnupg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 # Production dependencies only (tsx is a runtime dep so the TS server can run)
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 
-# Built frontend + server source
+# Built frontend + server source (includes server/db/migrations/*.sql)
 COPY --from=builder /app/dist ./dist
 COPY server ./server
 

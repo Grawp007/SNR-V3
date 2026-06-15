@@ -14,7 +14,7 @@ const router = Router();
 
 // ── POST /api/threat-actors — manually create a new threat actor ────────────
 
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const teamId = authReq.teamId;
   const db = getDb();
@@ -36,9 +36,9 @@ router.post('/', (req: Request, res: Response) => {
   }
 
   // Check for duplicate name (case-insensitive) within team
-  const existing = db.prepare(
+  const existing = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE LOWER(name) = ? AND team_id = ?'
-  ).get(name.trim().toLowerCase(), teamId) as { id: string; name: string } | undefined;
+  ).get(name.trim().toLowerCase(), teamId)) as { id: string; name: string } | undefined;
 
   if (existing) {
     res.status(409).json({ error: `A threat actor named "${existing.name}" already exists` });
@@ -54,7 +54,7 @@ router.post('/', (req: Request, res: Response) => {
   const id = crypto.randomUUID();
   const now = Date.now();
 
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO threat_actors (id, name, aliases, motivation, attribution_confidence, intrusion_set, campaign_name, malware_families, description, team_id, created_by, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -102,7 +102,7 @@ router.post('/', (req: Request, res: Response) => {
 
 // ── GET /api/threat-actors — list actors for the team ─────────────────────────
 
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const teamId = authReq.teamId;
   const search = (req.query['search'] as string) || '';
@@ -120,11 +120,11 @@ router.get('/', (req: Request, res: Response) => {
     params.push(searchPattern, searchPattern);
   }
 
-  const countRow = db.prepare(
+  const countRow = (await db.prepare(
     `SELECT COUNT(*) as total FROM threat_actors ta ${whereClause}`
-  ).get(...params) as { total: number };
+  ).get(...params)) as { total: number };
 
-  const actors = db.prepare(`
+  const actors = (await db.prepare(`
     SELECT ta.*,
       COUNT(sta.session_id) as session_count,
       MAX(sta.linked_at) as latest_session_at
@@ -134,7 +134,7 @@ router.get('/', (req: Request, res: Response) => {
     GROUP BY ta.id
     ORDER BY latest_session_at DESC NULLS LAST, ta.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(...params, limit, offset) as Array<Record<string, unknown>>;
+  `).all(...params, limit, offset)) as Array<Record<string, unknown>>;
 
   // Parse JSON fields for the response
   const mapped = actors.map((a) => ({
@@ -157,14 +157,14 @@ router.get('/', (req: Request, res: Response) => {
 
 // ── GET /api/threat-actors/:id — actor detail with aggregated data ────────────
 
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const db = getDb();
 
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT * FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as Record<string, unknown> | undefined;
+  ).get(actorId, authReq.teamId)) as Record<string, unknown> | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -172,13 +172,13 @@ router.get('/:id', (req: Request, res: Response) => {
   }
 
   // Linked sessions
-  const linkedSessions = db.prepare(`
+  const linkedSessions = (await db.prepare(`
     SELECT s.id, s.name, s.severity, s.audience, s.created_at, sta.link_type
     FROM session_threat_actors sta
     JOIN sessions s ON s.id = sta.session_id
     WHERE sta.threat_actor_id = ? AND s.deleted_at IS NULL
     ORDER BY s.created_at DESC
-  `).all(actorId) as Array<Record<string, unknown>>;
+  `).all(actorId)) as Array<Record<string, unknown>>;
 
   // Aggregate TTPs and IOCs from linked session results
   const sessionIds = linkedSessions.map((s) => s.id as string);
@@ -186,9 +186,9 @@ router.get('/:id', (req: Request, res: Response) => {
   const aggregatedIocs = new Map<string, { type: string; value: string; context: string; confidence: string; session_count: number; first_seen: number; last_seen: number }>();
 
   for (const sid of sessionIds) {
-    const row = db.prepare(
+    const row = (await db.prepare(
       'SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1'
-    ).get(sid) as { result_json: string } | undefined;
+    ).get(sid)) as { result_json: string } | undefined;
 
     if (!row) continue;
 
@@ -274,14 +274,14 @@ router.get('/:id', (req: Request, res: Response) => {
 
 // ── PATCH /api/threat-actors/:id — update actor metadata ──────────────────────
 
-router.patch('/:id', (req: Request, res: Response) => {
+router.patch('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const db = getDb();
 
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT * FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as Record<string, unknown> | undefined;
+  ).get(actorId, authReq.teamId)) as Record<string, unknown> | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -344,7 +344,7 @@ router.patch('/:id', (req: Request, res: Response) => {
   params.push(Date.now());
   params.push(actorId);
 
-  db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  await db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
 
   appendAuditLog({
     analyst_name: authReq.user.displayName,
@@ -358,7 +358,7 @@ router.patch('/:id', (req: Request, res: Response) => {
 
 // ── POST /api/threat-actors/:id/link — manually link a session ────────────────
 
-router.post('/:id/link', (req: Request, res: Response) => {
+router.post('/:id/link', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const { session_id } = req.body as { session_id: string };
@@ -370,9 +370,9 @@ router.post('/:id/link', (req: Request, res: Response) => {
   }
 
   // Verify actor belongs to team
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as { id: string; name: string } | undefined;
+  ).get(actorId, authReq.teamId)) as { id: string; name: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -380,9 +380,9 @@ router.post('/:id/link', (req: Request, res: Response) => {
   }
 
   // Verify session belongs to team
-  const session = db.prepare(
+  const session = (await db.prepare(
     'SELECT id FROM sessions WHERE id = ? AND team_id = ? AND deleted_at IS NULL'
-  ).get(session_id, authReq.teamId) as { id: string } | undefined;
+  ).get(session_id, authReq.teamId)) as { id: string } | undefined;
 
   if (!session) {
     res.status(404).json({ error: 'Session not found' });
@@ -390,7 +390,7 @@ router.post('/:id/link', (req: Request, res: Response) => {
   }
 
   // Check for existing link
-  const existing = db.prepare(
+  const existing = await db.prepare(
     'SELECT session_id FROM session_threat_actors WHERE session_id = ? AND threat_actor_id = ?'
   ).get(session_id, actorId);
 
@@ -399,7 +399,7 @@ router.post('/:id/link', (req: Request, res: Response) => {
     return;
   }
 
-  db.prepare(
+  await db.prepare(
     'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
   ).run(session_id, actorId, 'manual', Date.now(), authReq.user.id);
 
@@ -416,7 +416,7 @@ router.post('/:id/link', (req: Request, res: Response) => {
 
 // ── POST /api/threat-actors/:id/link/bulk — bulk link multiple sessions ──────
 
-router.post('/:id/link/bulk', (req: Request, res: Response) => {
+router.post('/:id/link/bulk', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const { session_ids, remove_existing } = req.body as { session_ids: string[]; remove_existing?: boolean };
@@ -433,9 +433,9 @@ router.post('/:id/link/bulk', (req: Request, res: Response) => {
   }
 
   // Verify actor belongs to team
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as { id: string; name: string } | undefined;
+  ).get(actorId, authReq.teamId)) as { id: string; name: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -448,9 +448,9 @@ router.post('/:id/link/bulk', (req: Request, res: Response) => {
 
   for (const sessionId of session_ids) {
     // Verify session belongs to team
-    const session = db.prepare(
+    const session = (await db.prepare(
       'SELECT id FROM sessions WHERE id = ? AND team_id = ? AND deleted_at IS NULL'
-    ).get(sessionId, authReq.teamId) as { id: string } | undefined;
+    ).get(sessionId, authReq.teamId)) as { id: string } | undefined;
 
     if (!session) {
       skipped++;
@@ -459,11 +459,11 @@ router.post('/:id/link/bulk', (req: Request, res: Response) => {
 
     // Optionally remove existing actor links for this session (reassignment)
     if (remove_existing) {
-      db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(sessionId);
+      await db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(sessionId);
     }
 
     // Check for existing link to THIS actor
-    const existingLink = db.prepare(
+    const existingLink = await db.prepare(
       'SELECT session_id FROM session_threat_actors WHERE session_id = ? AND threat_actor_id = ?'
     ).get(sessionId, actorId);
 
@@ -472,7 +472,7 @@ router.post('/:id/link/bulk', (req: Request, res: Response) => {
       continue;
     }
 
-    db.prepare(
+    await db.prepare(
       'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
     ).run(sessionId, actorId, 'manual', now, authReq.user.id);
     linked++;
@@ -492,23 +492,23 @@ router.post('/:id/link/bulk', (req: Request, res: Response) => {
 
 // ── DELETE /api/threat-actors/:id/link/:sessionId — unlink a session ──────────
 
-router.delete('/:id/link/:sessionId', (req: Request, res: Response) => {
+router.delete('/:id/link/:sessionId', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const sessionId = req.params['sessionId'];
   const db = getDb();
 
   // Verify actor belongs to team
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as { id: string; name: string } | undefined;
+  ).get(actorId, authReq.teamId)) as { id: string; name: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
     return;
   }
 
-  const result = db.prepare(
+  const result = await db.prepare(
     'DELETE FROM session_threat_actors WHERE session_id = ? AND threat_actor_id = ?'
   ).run(sessionId, actorId);
 
@@ -530,7 +530,7 @@ router.delete('/:id/link/:sessionId', (req: Request, res: Response) => {
 
 // ── POST /api/threat-actors/merge — merge two actors ──────────────────────────
 
-router.post('/merge', (req: Request, res: Response) => {
+router.post('/merge', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const { source_id, target_id } = req.body as { source_id: string; target_id: string };
   const db = getDb();
@@ -544,12 +544,12 @@ router.post('/merge', (req: Request, res: Response) => {
     return;
   }
 
-  const source = db.prepare(
+  const source = (await db.prepare(
     'SELECT * FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(source_id, authReq.teamId) as Record<string, unknown> | undefined;
-  const target = db.prepare(
+  ).get(source_id, authReq.teamId)) as Record<string, unknown> | undefined;
+  const target = (await db.prepare(
     'SELECT * FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(target_id, authReq.teamId) as Record<string, unknown> | undefined;
+  ).get(target_id, authReq.teamId)) as Record<string, unknown> | undefined;
 
   if (!source || !target) {
     res.status(404).json({ error: 'One or both threat actors not found' });
@@ -559,13 +559,13 @@ router.post('/merge', (req: Request, res: Response) => {
   const now = Date.now();
 
   // Move all links from source to target (ignore duplicates)
-  const sourceLinks = db.prepare(
+  const sourceLinks = (await db.prepare(
     'SELECT session_id, link_type, linked_at, linked_by FROM session_threat_actors WHERE threat_actor_id = ?'
-  ).all(source_id) as Array<{ session_id: string; link_type: string; linked_at: number; linked_by: string }>;
+  ).all(source_id)) as Array<{ session_id: string; link_type: string; linked_at: number; linked_by: string }>;
 
   for (const link of sourceLinks) {
-    db.prepare(
-      'INSERT OR IGNORE INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
+    await db.prepare(
+      'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, threat_actor_id) DO NOTHING'
     ).run(link.session_id, target_id, link.link_type, link.linked_at, link.linked_by);
   }
 
@@ -618,16 +618,16 @@ router.post('/merge', (req: Request, res: Response) => {
   }
 
   params.push(target_id);
-  db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  await db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
 
   // Record the merge for audit
-  db.prepare(
+  await db.prepare(
     'INSERT INTO threat_actor_merges (id, source_actor_id, target_actor_id, source_actor_name, merged_by, merged_at) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(crypto.randomUUID(), source_id, target_id, sourceName, authReq.user.id, now);
 
   // Delete source links and source actor (CASCADE handles links)
-  db.prepare('DELETE FROM session_threat_actors WHERE threat_actor_id = ?').run(source_id);
-  db.prepare('DELETE FROM threat_actors WHERE id = ?').run(source_id);
+  await db.prepare('DELETE FROM session_threat_actors WHERE threat_actor_id = ?').run(source_id);
+  await db.prepare('DELETE FROM threat_actors WHERE id = ?').run(source_id);
 
   appendAuditLog({
     analyst_name: authReq.user.displayName,
@@ -643,14 +643,14 @@ router.post('/merge', (req: Request, res: Response) => {
 
 // ── DELETE /api/threat-actors/:id — delete an actor ───────────────────────────
 
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const db = getDb();
 
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as { id: string; name: string } | undefined;
+  ).get(actorId, authReq.teamId)) as { id: string; name: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -658,7 +658,7 @@ router.delete('/:id', (req: Request, res: Response) => {
   }
 
   // CASCADE handles session_threat_actors cleanup
-  db.prepare('DELETE FROM threat_actors WHERE id = ?').run(actorId);
+  await db.prepare('DELETE FROM threat_actors WHERE id = ?').run(actorId);
 
   appendAuditLog({
     analyst_name: authReq.user.displayName,
@@ -672,16 +672,16 @@ router.delete('/:id', (req: Request, res: Response) => {
 
 // ── GET /api/threat-actors/:id/sessions/available — sessions not yet linked ───
 
-router.get('/:id/sessions/available', (req: Request, res: Response) => {
+router.get('/:id/sessions/available', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const actorId = req.params['id'];
   const search = (req.query['search'] as string) || '';
   const db = getDb();
 
   // Verify actor belongs to team
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(actorId, authReq.teamId) as { id: string } | undefined;
+  ).get(actorId, authReq.teamId)) as { id: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -703,7 +703,7 @@ router.get('/:id/sessions/available', (req: Request, res: Response) => {
 
   query += ' ORDER BY s.created_at DESC LIMIT 20';
 
-  const sessions = db.prepare(query).all(...params) as Array<Record<string, unknown>>;
+  const sessions = (await db.prepare(query).all(...params)) as Array<Record<string, unknown>>;
   res.json({ sessions });
 });
 

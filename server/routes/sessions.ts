@@ -11,13 +11,13 @@ const router = Router();
  * Helper: fetch a session by ID and verify team ownership.
  * Returns the session row or sends an error response and returns null.
  */
-function fetchSessionWithTeamCheck(
+async function fetchSessionWithTeamCheck(
   req: Request,
   res: Response,
-): Record<string, unknown> | null {
+): Promise<Record<string, unknown> | null> {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(req.params.id) as Record<string, unknown> | undefined;
+  const session = (await db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(req.params.id)) as Record<string, unknown> | undefined;
   if (!session) {
     res.status(404).json({ error: 'Session not found' });
     return null;
@@ -31,7 +31,7 @@ function fetchSessionWithTeamCheck(
 }
 
 // GET /api/sessions — list sessions with optional pagination and filtering
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const limit = Math.min(parseInt(req.query.limit as string ?? '20', 10) || 20, 200);
@@ -83,7 +83,7 @@ router.get('/', (req: Request, res: Response) => {
 
   const whereClauseFinal = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const sessions = db.prepare(`
+  const sessions = await db.prepare(`
     SELECT s.id, s.name, s.incident_id, s.created_at, s.updated_at,
            s.severity, s.audience, s.version, s.status, s.tags
     FROM sessions s
@@ -92,23 +92,23 @@ router.get('/', (req: Request, res: Response) => {
     LIMIT ? OFFSET ?
   `).all(...params, limit, offset);
 
-  const total = (db.prepare(`SELECT COUNT(*) as count FROM sessions s ${whereClauseFinal}`).get(...params) as { count: number }).count;
+  const total = ((await db.prepare(`SELECT COUNT(*) as count FROM sessions s ${whereClauseFinal}`).get(...params)) as { count: number }).count;
 
   res.json({ sessions, total, limit, offset });
 });
 
 // GET /api/sessions/audit/log — audit log (must be before /:id to avoid shadowing)
-router.get('/audit/log', (req: Request, res: Response) => {
+router.get('/audit/log', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
 
   let rows;
   if (authReq.user.role === 'admin' && !authReq.teamId) {
     // Admin without team context — return all audit log entries
-    rows = db.prepare('SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT 100').all();
+    rows = await db.prepare('SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT 100').all();
   } else {
     // Scoped to sessions belonging to the team
-    rows = db.prepare(`
+    rows = await db.prepare(`
       SELECT al.* FROM audit_log al
       WHERE al.session_id IN (SELECT id FROM sessions WHERE team_id = ?)
       ORDER BY al.timestamp DESC
@@ -121,30 +121,30 @@ router.get('/audit/log', (req: Request, res: Response) => {
 
 // GET /api/sessions/tags/all — list all unique tags used across the team
 // (Must be defined before /:id to avoid Express treating "tags" as a session ID)
-router.get('/tags/all', (req: Request, res: Response) => {
+router.get('/tags/all', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
 
   const rows = authReq.teamId
-    ? db.prepare(`
-        SELECT DISTINCT json_each.value AS tag
-        FROM sessions s, json_each(s.tags)
-        WHERE s.team_id = ? AND s.tags != '[]' AND s.deleted_at IS NULL
+    ? (await db.prepare(`
+        SELECT DISTINCT t.value AS tag
+        FROM sessions s, jsonb_array_elements_text(s.tags::jsonb) AS t(value)
+        WHERE s.team_id = ? AND s.tags IS NOT NULL AND s.tags != '[]' AND s.deleted_at IS NULL
         ORDER BY tag ASC
-      `).all(authReq.teamId) as Array<{ tag: string }>
-    : db.prepare(`
-        SELECT DISTINCT json_each.value AS tag
-        FROM sessions s, json_each(s.tags)
-        WHERE s.tags != '[]' AND s.deleted_at IS NULL
+      `).all(authReq.teamId)) as Array<{ tag: string }>
+    : (await db.prepare(`
+        SELECT DISTINCT t.value AS tag
+        FROM sessions s, jsonb_array_elements_text(s.tags::jsonb) AS t(value)
+        WHERE s.tags IS NOT NULL AND s.tags != '[]' AND s.deleted_at IS NULL
         ORDER BY tag ASC
-      `).all() as Array<{ tag: string }>;
+      `).all()) as Array<{ tag: string }>;
 
   res.json({ tags: rows.map((r) => r.tag) });
 });
 
 // GET /api/sessions/ungrouped — sessions not linked to any real threat actor
 // (Must be defined before /:id to avoid Express treating "ungrouped" as a session ID)
-router.get('/ungrouped', (req: Request, res: Response) => {
+router.get('/ungrouped', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const search = (req.query.search as string || '').trim();
@@ -170,32 +170,32 @@ router.get('/ungrouped', (req: Request, res: Response) => {
   query += ' ORDER BY s.created_at DESC LIMIT ?';
   params.push(limit);
 
-  const sessions = db.prepare(query).all(...params) as Array<Record<string, unknown>>;
+  const sessions = (await db.prepare(query).all(...params)) as Array<Record<string, unknown>>;
   res.json({ sessions });
 });
 
 // GET /api/sessions/:id — get session detail with result
-router.get('/:id', (req: Request, res: Response) => {
-  const session = fetchSessionWithTeamCheck(req, res);
+router.get('/:id', async (req: Request, res: Response) => {
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const db = getDb();
 
-  const result = db.prepare(`
+  const result = (await db.prepare(`
     SELECT * FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1
-  `).get(req.params.id) as { result_json: string; analyst_overrides?: string } | undefined;
+  `).get(req.params.id)) as { result_json: string; analyst_overrides?: string } | undefined;
 
-  const inputs = db.prepare('SELECT * FROM session_inputs WHERE session_id = ?').all(req.params.id);
-  const note = db.prepare('SELECT * FROM analyst_notes WHERE session_id = ?').get(req.params.id) as { content: string } | undefined;
+  const inputs = await db.prepare('SELECT * FROM session_inputs WHERE session_id = ?').all(req.params.id);
+  const note = (await db.prepare('SELECT * FROM analyst_notes WHERE session_id = ?').get(req.params.id)) as { content: string } | undefined;
 
   // Fetch linked threat actor (first non-Unattributed, or fallback to any)
-  const linkedActor = db.prepare(`
+  const linkedActor = (await db.prepare(`
     SELECT ta.id, ta.name FROM session_threat_actors sta
     JOIN threat_actors ta ON ta.id = sta.threat_actor_id
     WHERE sta.session_id = ?
     ORDER BY CASE WHEN ta.name = 'Unattributed' THEN 1 ELSE 0 END, sta.linked_at DESC
     LIMIT 1
-  `).get(req.params.id) as { id: string; name: string } | undefined;
+  `).get(req.params.id)) as { id: string; name: string } | undefined;
 
   let parsedResult = null;
   let parsedOverrides: Record<string, string> = {};
@@ -220,7 +220,7 @@ router.get('/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/sessions — create session record before analysis
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const id = uuidv4();
@@ -231,7 +231,7 @@ router.post('/', (req: Request, res: Response) => {
     audience?: string;
   };
 
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO sessions (id, name, incident_id, created_at, updated_at, audience, status, team_id, created_by)
     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
   `).run(
@@ -257,15 +257,15 @@ router.post('/', (req: Request, res: Response) => {
 });
 
 // PATCH /api/sessions/:id/name — rename session
-router.patch('/:id/name', (req: Request, res: Response) => {
+router.patch('/:id/name', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const db = getDb();
   const { name } = req.body as { name: string };
   if (!name?.trim()) return res.status(400).json({ error: 'name required' });
-  db.prepare('UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?')
     .run(name.trim(), Date.now(), req.params.id);
 
   appendAuditLog({
@@ -280,21 +280,21 @@ router.patch('/:id/name', (req: Request, res: Response) => {
 });
 
 // PATCH /api/sessions/:id/note — save analyst note
-router.patch('/:id/note', (req: Request, res: Response) => {
+router.patch('/:id/note', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const db = getDb();
   const { content } = req.body as { content: string };
   const now = Date.now();
-  const existing = db.prepare('SELECT id FROM analyst_notes WHERE session_id = ?').get(req.params.id);
+  const existing = await db.prepare('SELECT id FROM analyst_notes WHERE session_id = ?').get(req.params.id);
 
   if (existing) {
-    db.prepare('UPDATE analyst_notes SET content = ?, updated_at = ? WHERE session_id = ?')
+    await db.prepare('UPDATE analyst_notes SET content = ?, updated_at = ? WHERE session_id = ?')
       .run(content, now, req.params.id);
   } else {
-    db.prepare('INSERT INTO analyst_notes (id, session_id, content, created_at, updated_at) VALUES (?,?,?,?,?)')
+    await db.prepare('INSERT INTO analyst_notes (id, session_id, content, created_at, updated_at) VALUES (?,?,?,?,?)')
       .run(uuidv4(), req.params.id, content, now, now);
   }
 
@@ -310,9 +310,9 @@ router.patch('/:id/note', (req: Request, res: Response) => {
 });
 
 // PATCH /api/sessions/:id/overrides — save analyst overrides
-router.patch('/:id/overrides', (req: Request, res: Response) => {
+router.patch('/:id/overrides', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const db = getDb();
@@ -320,18 +320,18 @@ router.patch('/:id/overrides', (req: Request, res: Response) => {
 
   // Optimistic locking — reject if version has changed since client loaded data
   if (expectedVersion !== undefined) {
-    const current = db.prepare('SELECT MAX(version) as v FROM analysis_results WHERE session_id = ?').get(req.params.id) as { v: number | null };
+    const current = (await db.prepare('SELECT MAX(version) as v FROM analysis_results WHERE session_id = ?').get(req.params.id)) as { v: number | null };
     if (current.v !== null && current.v !== expectedVersion) {
       res.status(409).json({ error: 'Analysis was updated by another user. Please reload and try again.' });
       return;
     }
   }
 
-  db.prepare('UPDATE analysis_results SET analyst_overrides = ? WHERE session_id = ? AND version = (SELECT MAX(version) FROM analysis_results WHERE session_id = ?)')
+  await db.prepare('UPDATE analysis_results SET analyst_overrides = ? WHERE session_id = ? AND version = (SELECT MAX(version) FROM analysis_results WHERE session_id = ?)')
     .run(JSON.stringify(overrides), req.params.id, req.params.id);
   // Sync severity to sessions table so the sidebar reflects the change immediately
   if (overrides.severity_badge) {
-    db.prepare('UPDATE sessions SET severity = ?, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE sessions SET severity = ?, updated_at = ? WHERE id = ?')
       .run(overrides.severity_badge, Date.now(), req.params.id);
   }
 
@@ -348,24 +348,24 @@ router.patch('/:id/overrides', (req: Request, res: Response) => {
 
 // DELETE /api/sessions/:id — soft-delete a session (recoverable for 7 days,
 // then purged with all related data on server start)
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const db = getDb();
 
   // Only session creator, team lead, or admin can delete
   if (authReq.user.role !== 'admin' && session.created_by !== authReq.user.id) {
-    const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
-      .get(authReq.teamId, authReq.user.id) as { role: string } | undefined;
+    const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
+      .get(authReq.teamId, authReq.user.id)) as { role: string } | undefined;
     if (!membership || membership.role !== 'lead') {
       res.status(403).json({ error: 'Only the session creator, team lead, or admin can delete sessions' });
       return;
     }
   }
 
-  db.prepare('UPDATE sessions SET deleted_at = ?, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE sessions SET deleted_at = ?, updated_at = ? WHERE id = ?')
     .run(Date.now(), Date.now(), req.params.id);
 
   appendAuditLog({
@@ -380,18 +380,18 @@ router.delete('/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/sessions/:id/restore — undo a soft delete (within retention window)
-router.post('/:id/restore', (req: Request, res: Response) => {
+router.post('/:id/restore', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NOT NULL')
-    .get(req.params.id) as Record<string, unknown> | undefined;
+  const session = (await db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NOT NULL')
+    .get(req.params.id)) as Record<string, unknown> | undefined;
 
   if (!session || (authReq.teamId && session.team_id !== authReq.teamId)) {
     res.status(404).json({ error: 'Deleted session not found' });
     return;
   }
 
-  db.prepare('UPDATE sessions SET deleted_at = NULL, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE sessions SET deleted_at = NULL, updated_at = ? WHERE id = ?')
     .run(Date.now(), req.params.id);
 
   appendAuditLog({
@@ -407,7 +407,7 @@ router.post('/:id/restore', (req: Request, res: Response) => {
 
 // ── Bulk delete ────────────────────────────────────────────────────────────
 
-router.post('/bulk-delete', (req: Request, res: Response) => {
+router.post('/bulk-delete', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const { session_ids } = req.body as { session_ids: string[] };
 
@@ -426,7 +426,7 @@ router.post('/bulk-delete', (req: Request, res: Response) => {
   const errors: string[] = [];
 
   for (const id of session_ids) {
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(id) as Record<string, unknown> | undefined;
+    const session = (await db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(id)) as Record<string, unknown> | undefined;
     if (!session) continue;
 
     // Team scope check
@@ -434,15 +434,15 @@ router.post('/bulk-delete', (req: Request, res: Response) => {
 
     // Permission check: creator, team lead, or admin
     if (authReq.user.role !== 'admin' && session.created_by !== authReq.user.id) {
-      const membership = db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
-        .get(authReq.teamId, authReq.user.id) as { role: string } | undefined;
+      const membership = (await db.prepare('SELECT role FROM team_members WHERE team_id = ? AND user_id = ?')
+        .get(authReq.teamId, authReq.user.id)) as { role: string } | undefined;
       if (!membership || membership.role !== 'lead') {
         errors.push(`No permission to delete session ${id}`);
         continue;
       }
     }
 
-    db.prepare('UPDATE sessions SET deleted_at = ?, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE sessions SET deleted_at = ?, updated_at = ? WHERE id = ?')
       .run(Date.now(), Date.now(), id);
     deleted++;
 
@@ -462,9 +462,9 @@ router.post('/bulk-delete', (req: Request, res: Response) => {
 // ── Tags ──────────────────────────────────────────────────────────────────
 
 // PATCH /api/sessions/:id/tags — set tags for a session
-router.patch('/:id/tags', (req: Request, res: Response) => {
+router.patch('/:id/tags', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const { tags } = req.body as { tags: string[] };
@@ -479,7 +479,7 @@ router.patch('/:id/tags', (req: Request, res: Response) => {
   )].slice(0, 20);
 
   const db = getDb();
-  db.prepare('UPDATE sessions SET tags = ?, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE sessions SET tags = ?, updated_at = ? WHERE id = ?')
     .run(JSON.stringify(normalized), Date.now(), req.params.id);
 
   res.json({ ok: true, tags: normalized });
@@ -488,9 +488,9 @@ router.patch('/:id/tags', (req: Request, res: Response) => {
 // ── Threat Actor Assignment ─────────────────────────────────────────────────
 
 // PUT /api/sessions/:id/threat-actor — assign or reassign a threat actor to a session
-router.put('/:id/threat-actor', (req: Request, res: Response) => {
+router.put('/:id/threat-actor', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const session = fetchSessionWithTeamCheck(req, res);
+  const session = await fetchSessionWithTeamCheck(req, res);
   if (!session) return;
 
   const { threat_actor_id } = req.body as { threat_actor_id: string | null };
@@ -498,7 +498,7 @@ router.put('/:id/threat-actor', (req: Request, res: Response) => {
 
   if (threat_actor_id === null || threat_actor_id === undefined) {
     // Unassign — remove all threat actor links for this session
-    const result = db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(req.params.id);
+    const result = await db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(req.params.id);
 
     appendAuditLog({
       analyst_name: authReq.user.displayName,
@@ -513,9 +513,9 @@ router.put('/:id/threat-actor', (req: Request, res: Response) => {
   }
 
   // Verify actor belongs to team
-  const actor = db.prepare(
+  const actor = (await db.prepare(
     'SELECT id, name FROM threat_actors WHERE id = ? AND team_id = ?'
-  ).get(threat_actor_id, authReq.teamId) as { id: string; name: string } | undefined;
+  ).get(threat_actor_id, authReq.teamId)) as { id: string; name: string } | undefined;
 
   if (!actor) {
     res.status(404).json({ error: 'Threat actor not found' });
@@ -523,10 +523,10 @@ router.put('/:id/threat-actor', (req: Request, res: Response) => {
   }
 
   // Remove any existing links for this session first (reassignment)
-  db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(req.params.id);
+  await db.prepare('DELETE FROM session_threat_actors WHERE session_id = ?').run(req.params.id);
 
   // Create new link
-  db.prepare(
+  await db.prepare(
     'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
   ).run(req.params.id, threat_actor_id, 'manual', Date.now(), authReq.user.id);
 

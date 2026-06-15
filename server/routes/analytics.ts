@@ -24,7 +24,7 @@ type TechniqueEntry = {
 const router = Router();
 
 // GET /api/analytics?days=7|30|90|0&all=true
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
   const days = parseInt((req.query.days as string) ?? '30', 10);
@@ -39,17 +39,17 @@ router.get('/', (req: Request, res: Response) => {
   const teamWhere = applyTeamFilter ? ' AND s.team_id = ?' : '';
   const teamParams: unknown[] = applyTeamFilter ? [teamId] : [];
 
-  // 1. Sessions over time (daily buckets)
+  // 1. Sessions over time (daily buckets). Postgres: bucket epoch-ms via to_timestamp.
   const sessionsOverTime = cutoff !== null
-    ? db.prepare(`
-        SELECT strftime('%Y-%m-%d', datetime(s.created_at / 1000, 'unixepoch')) AS date,
+    ? await db.prepare(`
+        SELECT to_char(to_timestamp(s.created_at / 1000), 'YYYY-MM-DD') AS date,
                COUNT(*) AS count
         FROM sessions s
         WHERE s.status = 'complete' AND s.deleted_at IS NULL AND s.created_at >= ?${teamWhere}
         GROUP BY date ORDER BY date ASC
       `).all(cutoff, ...teamParams)
-    : db.prepare(`
-        SELECT strftime('%Y-%m-%d', datetime(s.created_at / 1000, 'unixepoch')) AS date,
+    : await db.prepare(`
+        SELECT to_char(to_timestamp(s.created_at / 1000), 'YYYY-MM-DD') AS date,
                COUNT(*) AS count
         FROM sessions s
         WHERE s.status = 'complete' AND s.deleted_at IS NULL${teamWhere}
@@ -57,7 +57,7 @@ router.get('/', (req: Request, res: Response) => {
       `).all(...teamParams);
 
   // 2. Severity distribution
-  const severityDistribution = db.prepare(`
+  const severityDistribution = await db.prepare(`
     SELECT COALESCE(s.severity, 'Unknown') AS severity, COUNT(*) AS count
     FROM sessions s WHERE s.status = 'complete' AND s.deleted_at IS NULL${teamWhere}
     GROUP BY severity
@@ -67,7 +67,7 @@ router.get('/', (req: Request, res: Response) => {
   `).all(...teamParams);
 
   // 3. Audience breakdown
-  const audienceBreakdown = db.prepare(`
+  const audienceBreakdown = await db.prepare(`
     SELECT COALESCE(s.audience, 'unknown') AS audience, COUNT(*) AS count
     FROM sessions s WHERE s.status = 'complete' AND s.deleted_at IS NULL${teamWhere}
     GROUP BY audience ORDER BY count DESC
@@ -75,72 +75,76 @@ router.get('/', (req: Request, res: Response) => {
 
   // 4. Export activity (from audit_log, scoped to team sessions)
   const exportActivity = applyTeamFilter
-    ? db.prepare(`
+    ? await db.prepare(`
         SELECT replace(al.action, 'export_', '') AS export_type, COUNT(*) AS count
         FROM audit_log al
         JOIN sessions s ON al.session_id = s.id
         WHERE al.action LIKE 'export_%' AND s.team_id = ? AND s.deleted_at IS NULL
         GROUP BY al.action ORDER BY count DESC
       `).all(teamId)
-    : db.prepare(`
+    : await db.prepare(`
         SELECT replace(action, 'export_', '') AS export_type, COUNT(*) AS count
         FROM audit_log WHERE action LIKE 'export_%'
         GROUP BY action ORDER BY count DESC
       `).all();
 
-  // 5. IOC type distribution (parse result_json via json_each)
+  // 5. IOC type distribution (parse result_json via snr_json_array → jsonb)
   const iocDistribution = applyTeamFilter
-    ? db.prepare(`
-        SELECT json_extract(ioc.value, '$.type') AS ioc_type, COUNT(*) AS count
+    ? await db.prepare(`
+        SELECT ioc.value ->> 'type' AS ioc_type, COUNT(*) AS count
         FROM analysis_results ar
         JOIN sessions s ON ar.session_id = s.id,
-        json_each(ar.result_json, '$.iocs') AS ioc
-        WHERE json_extract(ioc.value, '$.type') IS NOT NULL AND s.team_id = ? AND s.deleted_at IS NULL
+        snr_json_array(ar.result_json, 'iocs') AS ioc(value)
+        WHERE ioc.value ->> 'type' IS NOT NULL AND s.team_id = ? AND s.deleted_at IS NULL
         GROUP BY ioc_type ORDER BY count DESC LIMIT 500
       `).all(teamId)
-    : db.prepare(`
-        SELECT json_extract(ioc.value, '$.type') AS ioc_type, COUNT(*) AS count
+    : await db.prepare(`
+        SELECT ioc.value ->> 'type' AS ioc_type, COUNT(*) AS count
         FROM analysis_results ar
         JOIN sessions s ON ar.session_id = s.id,
-        json_each(ar.result_json, '$.iocs') AS ioc
-        WHERE json_extract(ioc.value, '$.type') IS NOT NULL AND s.deleted_at IS NULL
+        snr_json_array(ar.result_json, 'iocs') AS ioc(value)
+        WHERE ioc.value ->> 'type' IS NOT NULL AND s.deleted_at IS NULL
         GROUP BY ioc_type ORDER BY count DESC LIMIT 500
       `).all();
 
-  // 6. ATT&CK technique -> sessions mapping
+  // 6. ATT&CK technique -> sessions mapping. Postgres requires every selected
+  // column to be grouped or aggregated, so all output columns are in GROUP BY
+  // (within a technique_id+session_id the others are functionally constant).
   const rawTechniques = applyTeamFilter
-    ? db.prepare(`
+    ? await db.prepare(`
         SELECT
-          json_extract(tech.value, '$.technique_id')   AS technique_id,
-          json_extract(tech.value, '$.technique_name') AS technique_name,
-          json_extract(tech.value, '$.tactic')         AS tactic,
+          tech.value ->> 'technique_id'   AS technique_id,
+          tech.value ->> 'technique_name' AS technique_name,
+          tech.value ->> 'tactic'         AS tactic,
           ar.session_id,
           s.name        AS session_name,
           s.severity    AS session_severity,
           s.created_at  AS session_created_at
         FROM analysis_results ar
         JOIN sessions s ON ar.session_id = s.id,
-        json_each(ar.result_json, '$.attack_chain') AS tech
+        snr_json_array(ar.result_json, 'attack_chain') AS tech(value)
         WHERE s.team_id = ? AND s.deleted_at IS NULL
-        GROUP BY json_extract(tech.value, '$.technique_id'), ar.session_id
-        ORDER BY json_extract(tech.value, '$.technique_id')
+        GROUP BY tech.value ->> 'technique_id', tech.value ->> 'technique_name',
+                 tech.value ->> 'tactic', ar.session_id, s.name, s.severity, s.created_at
+        ORDER BY technique_id
         LIMIT 5000
       `).all(teamId) as TechniqueRow[]
-    : db.prepare(`
+    : await db.prepare(`
         SELECT
-          json_extract(tech.value, '$.technique_id')   AS technique_id,
-          json_extract(tech.value, '$.technique_name') AS technique_name,
-          json_extract(tech.value, '$.tactic')         AS tactic,
+          tech.value ->> 'technique_id'   AS technique_id,
+          tech.value ->> 'technique_name' AS technique_name,
+          tech.value ->> 'tactic'         AS tactic,
           ar.session_id,
           s.name        AS session_name,
           s.severity    AS session_severity,
           s.created_at  AS session_created_at
         FROM analysis_results ar
         JOIN sessions s ON ar.session_id = s.id,
-        json_each(ar.result_json, '$.attack_chain') AS tech
+        snr_json_array(ar.result_json, 'attack_chain') AS tech(value)
         WHERE s.deleted_at IS NULL
-        GROUP BY json_extract(tech.value, '$.technique_id'), ar.session_id
-        ORDER BY json_extract(tech.value, '$.technique_id')
+        GROUP BY tech.value ->> 'technique_id', tech.value ->> 'technique_name',
+                 tech.value ->> 'tactic', ar.session_id, s.name, s.severity, s.created_at
+        ORDER BY technique_id
         LIMIT 5000
       `).all() as TechniqueRow[];
 

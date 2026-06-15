@@ -32,13 +32,13 @@ interface ThreatActorRow {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function autoLinkThreatActor(db: any, sessionId: string, result: AnalysisResultLike, teamId: string, userId: string): void {
+export async function autoLinkThreatActor(db: any, sessionId: string, result: AnalysisResultLike, teamId: string, userId: string): Promise<void> {
   const actor = result.threat_actor;
   const hasAttribution = actor?.name && actor.name.trim();
 
   // If no attribution, link to the team's "Unattributed" placeholder
   if (!hasAttribution) {
-    linkToUnattributed(db, sessionId, teamId, userId);
+    await linkToUnattributed(db, sessionId, teamId, userId);
     return;
   }
 
@@ -47,9 +47,9 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
   const now = Date.now();
 
   // Check if this session is already linked to any actor
-  const existingLink = db.prepare(
+  const existingLink = (await db.prepare(
     'SELECT threat_actor_id FROM session_threat_actors WHERE session_id = ?'
-  ).get(sessionId) as { threat_actor_id: string } | undefined;
+  ).get(sessionId)) as { threat_actor_id: string } | undefined;
 
   if (existingLink) {
     logger.debug({ sessionId, actorId: existingLink.threat_actor_id }, 'Session already linked to a threat actor');
@@ -57,15 +57,15 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
   }
 
   // Try to find an existing canonical actor by exact name match (case-insensitive)
-  let matched: ThreatActorRow | undefined = db.prepare(
+  let matched: ThreatActorRow | undefined = (await db.prepare(
     'SELECT * FROM threat_actors WHERE LOWER(name) = ? AND team_id = ?'
-  ).get(nameLower, teamId) as ThreatActorRow | undefined;
+  ).get(nameLower, teamId)) as ThreatActorRow | undefined;
 
   // If no exact name match, check aliases across all team actors
   if (!matched) {
-    const allActors = db.prepare(
+    const allActors = (await db.prepare(
       'SELECT * FROM threat_actors WHERE team_id = ?'
-    ).all(teamId) as ThreatActorRow[];
+    ).all(teamId)) as ThreatActorRow[];
 
     for (const a of allActors) {
       try {
@@ -80,8 +80,8 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
 
   if (matched) {
     // Link session to existing actor
-    db.prepare(
-      'INSERT OR IGNORE INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
+    await db.prepare(
+      'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, threat_actor_id) DO NOTHING'
     ).run(sessionId, matched.id, 'auto', now, userId);
 
     // Enrich canonical record with new optional fields if they were empty
@@ -129,14 +129,14 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
       updates.push('updated_at = ?');
       params.push(now);
       params.push(matched.id);
-      db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      await db.prepare(`UPDATE threat_actors SET ${updates.join(', ')} WHERE id = ?`).run(...params);
     }
 
     logger.info({ sessionId, actorId: matched.id, actorName: matched.name }, 'Session auto-linked to existing threat actor');
   } else {
     // Create new canonical actor record
     const actorId = crypto.randomUUID();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO threat_actors (id, name, aliases, motivation, attribution_confidence, intrusion_set, campaign_name, malware_families, description, team_id, created_by, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
@@ -156,7 +156,7 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
     );
 
     // Link session to new actor
-    db.prepare(
+    await db.prepare(
       'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
     ).run(sessionId, actorId, 'auto', now, userId);
 
@@ -166,23 +166,23 @@ export function autoLinkThreatActor(db: any, sessionId: string, result: Analysis
 
 /** Find-or-create the team-scoped "Unattributed" placeholder and link the session to it. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function linkToUnattributed(db: any, sessionId: string, teamId: string, userId: string): void {
+async function linkToUnattributed(db: any, sessionId: string, teamId: string, userId: string): Promise<void> {
   const now = Date.now();
 
   // Already linked?
-  const existingLink = db.prepare(
+  const existingLink = (await db.prepare(
     'SELECT threat_actor_id FROM session_threat_actors WHERE session_id = ?'
-  ).get(sessionId) as { threat_actor_id: string } | undefined;
+  ).get(sessionId)) as { threat_actor_id: string } | undefined;
   if (existingLink) return;
 
   // Find the team's "Unattributed" actor
-  let placeholder = db.prepare(
+  let placeholder = (await db.prepare(
     "SELECT id FROM threat_actors WHERE name = 'Unattributed' AND team_id = ?"
-  ).get(teamId) as { id: string } | undefined;
+  ).get(teamId)) as { id: string } | undefined;
 
   if (!placeholder) {
     const id = crypto.randomUUID();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO threat_actors (id, name, aliases, motivation, attribution_confidence, intrusion_set, campaign_name, malware_families, description, team_id, created_by, created_at, updated_at)
       VALUES (?, 'Unattributed', '[]', NULL, NULL, NULL, NULL, '[]', 'Sessions where no specific threat actor could be attributed.', ?, ?, ?, ?)
     `).run(id, teamId, userId, now, now);
@@ -190,8 +190,8 @@ function linkToUnattributed(db: any, sessionId: string, teamId: string, userId: 
     logger.info({ teamId }, 'Created "Unattributed" placeholder actor for team');
   }
 
-  db.prepare(
-    'INSERT OR IGNORE INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?)'
+  await db.prepare(
+    'INSERT INTO session_threat_actors (session_id, threat_actor_id, link_type, linked_at, linked_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session_id, threat_actor_id) DO NOTHING'
   ).run(sessionId, placeholder.id, 'auto', now, userId);
 
   logger.debug({ sessionId }, 'Session auto-linked to Unattributed placeholder');

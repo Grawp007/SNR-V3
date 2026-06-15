@@ -25,10 +25,10 @@ const router = Router();
  * Verify a session belongs to the requesting user's team.
  * Returns the session row or sends 404 and returns null.
  */
-function verifySessionTeam(req: Request, res: Response, sessionId: string): Record<string, unknown> | null {
+async function verifySessionTeam(req: Request, res: Response, sessionId: string): Promise<Record<string, unknown> | null> {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId) as Record<string, unknown> | undefined;
+  const session = (await db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId)) as Record<string, unknown> | undefined;
   if (!session) { res.status(404).json({ error: 'No analysis found' }); return null; }
   if (authReq.teamId && session.team_id !== authReq.teamId) {
     res.status(404).json({ error: 'No analysis found' });
@@ -117,9 +117,9 @@ const PREVIEW_AUDIENCE_LABELS: Record<string, string> = {
 };
 
 // GET /api/analyze/email-preview — renders a live template preview with sample data
-router.get('/email-preview', (req: Request, res: Response) => {
+router.get('/email-preview', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const sections = parseSections(settings.report_sections || '');
 
   const tlp = (req.query['tlp'] as string) || 'AMBER';
@@ -159,9 +159,9 @@ router.get('/email-preview', (req: Request, res: Response) => {
 });
 
 // POST /api/analyze/email-preview — live preview with an in-progress template override
-router.post('/email-preview', (req: Request, res: Response) => {
+router.post('/email-preview', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const sections = parseSections(settings.report_sections || '');
 
   const { tlp = 'AMBER', audience = 'soc', template } = (req.body ?? {}) as {
@@ -250,20 +250,20 @@ router.post('/', upload.single('logFile'), async (req: Request, res: Response) =
     // Persist inputs (store hash reference, not cleartext in audit)
     const now = Date.now();
     if (siemClean) {
-      db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, created_at) VALUES (?,?,?,?,?)')
+      await db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, created_at) VALUES (?,?,?,?,?)')
         .run(uuidv4(), session_id, 'siem', siemClean, now);
     }
     if (textClean) {
-      db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, created_at) VALUES (?,?,?,?,?)')
+      await db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, created_at) VALUES (?,?,?,?,?)')
         .run(uuidv4(), session_id, 'text', textClean, now);
     }
     if (logClean) {
-      db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, filename, created_at) VALUES (?,?,?,?,?,?)')
+      await db.prepare('INSERT INTO session_inputs (id, session_id, input_type, content, filename, created_at) VALUES (?,?,?,?,?,?)')
         .run(uuidv4(), session_id, 'log', logClean, req.file?.originalname ?? 'upload', now);
     }
 
     // Update session status
-    db.prepare('UPDATE sessions SET status = ?, updated_at = ?, input_hash = ? WHERE id = ?')
+    await db.prepare('UPDATE sessions SET status = ?, updated_at = ?, input_hash = ? WHERE id = ?')
       .run('analyzing', now, inputHash, session_id);
 
     await runAnalysisPipeline(req, res, {
@@ -321,7 +321,7 @@ async function runAnalysisPipeline(
 
   try {
     // Load team-merged settings
-    const settings = loadMergedSettings(authReq.teamId);
+    const settings = await loadMergedSettings(authReq.teamId);
 
     sendEvent('status', { message: 'Phase 1 of 2 — Extracting ATT&CK techniques and IOCs…', phase: 1 });
 
@@ -395,18 +395,18 @@ async function runAnalysisPipeline(
     result.attack_flow = validateAttackFlow(result.attack_flow, result.attack_chain ?? []);
 
     // Determine latest version for this session
-    const latestVersion = (db.prepare('SELECT MAX(version) as v FROM analysis_results WHERE session_id = ?').get(p.sessionId) as { v: number | null }).v ?? 0;
+    const latestVersion = ((await db.prepare('SELECT MAX(version) as v FROM analysis_results WHERE session_id = ?').get(p.sessionId)) as { v: number | null }).v ?? 0;
     const newVersion = latestVersion + 1;
 
-    db.prepare('INSERT INTO analysis_results (id, session_id, version, result_json, created_at) VALUES (?,?,?,?,?)')
+    await db.prepare('INSERT INTO analysis_results (id, session_id, version, result_json, created_at) VALUES (?,?,?,?,?)')
       .run(uuidv4(), p.sessionId, newVersion, JSON.stringify(result), now);
 
-    db.prepare('UPDATE sessions SET status = ?, updated_at = ?, severity = ?, version = ? WHERE id = ?')
+    await db.prepare('UPDATE sessions SET status = ?, updated_at = ?, severity = ?, version = ? WHERE id = ?')
       .run('complete', now, result.incident_summary.severity, newVersion, p.sessionId);
 
     // Auto-link threat actor (additive, failure-safe)
     try {
-      autoLinkThreatActor(db, p.sessionId, result, authReq.teamId, authReq.user.id);
+      await autoLinkThreatActor(db, p.sessionId, result, authReq.teamId, authReq.user.id);
     } catch (err) {
       logger.warn({ err, session_id: p.sessionId }, 'Threat actor auto-link failed (non-fatal)');
     }
@@ -432,7 +432,7 @@ async function runAnalysisPipeline(
     // Mark the session failed so it doesn't sit in 'analyzing' forever and
     // the UI can offer a retry.
     try {
-      db.prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+      await db.prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
         .run('failed', Date.now(), p.sessionId);
     } catch { /* status update is best-effort */ }
     analysisRunsTotal.inc({ result: 'failed', kind: metricKind });
@@ -451,13 +451,13 @@ router.post('/rerun/:sessionId', async (req: Request, res: Response) => {
   const { audience: audienceOverride } = (req.body ?? {}) as { audience?: string };
   const db = getDb();
 
-  const session = verifySessionTeam(req, res, sessionId);
+  const session = await verifySessionTeam(req, res, sessionId);
   if (!session) return;
 
   // Load stored inputs — saved before the original analysis ran
-  const inputs = db.prepare(
+  const inputs = (await db.prepare(
     'SELECT input_type, content FROM session_inputs WHERE session_id = ? ORDER BY created_at ASC'
-  ).all(sessionId) as Array<{ input_type: string; content: string }>;
+  ).all(sessionId)) as Array<{ input_type: string; content: string }>;
 
   if (inputs.length === 0) {
     res.status(400).json({ error: 'No stored inputs found for this session — run a new analysis instead' });
@@ -479,14 +479,14 @@ router.post('/rerun/:sessionId', async (req: Request, res: Response) => {
 
   // Persist audience change if the analyst switched it for the re-run
   if (audienceOverride && audienceOverride !== session.audience) {
-    db.prepare('UPDATE sessions SET audience = ?, updated_at = ? WHERE id = ?')
+    await db.prepare('UPDATE sessions SET audience = ?, updated_at = ? WHERE id = ?')
       .run(audienceOverride, now, sessionId);
   }
 
   const inputRaw = [siemClean, textClean, logClean].join('||');
   const inputHash = crypto.createHash('sha256').update(inputRaw).digest('hex');
 
-  db.prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+  await db.prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
     .run('analyzing', now, sessionId);
 
   appendAuditLog({
@@ -513,12 +513,12 @@ router.post('/rerun/:sessionId', async (req: Request, res: Response) => {
 router.post('/export/stix', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const { session_id, tlp } = req.body as { session_id: string; tlp: string };
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string; analyst_overrides?: string } | undefined;
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string; analyst_overrides?: string } | undefined;
   if (!row) return res.status(404).json({ error: 'No analysis found' });
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   let result: AnalysisResult;
   let overrides: Record<string, string> | undefined;
   try {
@@ -552,10 +552,10 @@ router.post('/export/stix', async (req: Request, res: Response) => {
 router.post('/export/navigator', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const { session_id } = req.body as { session_id: string };
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
   const db = getDb();
-  const row = db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string } | undefined;
-  const session = db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id) as { name: string } | undefined;
+  const row = (await db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string } | undefined;
+  const session = (await db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id)) as { name: string } | undefined;
   if (!row) return res.status(404).json({ error: 'No analysis found' });
 
   let result: AnalysisResult;
@@ -686,13 +686,13 @@ router.post('/export/eml', async (req: Request, res: Response) => {
     email_content_overrides?: Partial<AnalysisResult['email_content']>;
   };
 
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string; analyst_overrides?: string } | undefined;
-  const session = db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id) as { name: string } | undefined;
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string; analyst_overrides?: string } | undefined;
+  const session = (await db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id)) as { name: string } | undefined;
   if (!row) return res.status(404).json({ error: 'No analysis found' });
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || authReq.user.displayName;
   const analystEmail = settings.analyst_email || authReq.user.email;
   const orgName = settings.org_name || 'Security Operations';
@@ -830,13 +830,13 @@ router.post('/export/zip', async (req: Request, res: Response) => {
     diagram_jpg_b64?: string;
     email_content_overrides?: Partial<AnalysisResult['email_content']>;
   };
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string; analyst_overrides?: string } | undefined;
-  const session = db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id) as { name: string } | undefined;
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string; analyst_overrides?: string } | undefined;
+  const session = (await db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id)) as { name: string } | undefined;
   if (!row) return res.status(404).json({ error: 'No analysis found' });
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || authReq.user.displayName;
   const analystEmail = settings.analyst_email || authReq.user.email;
   const orgName = settings.org_name || 'Security Operations';
@@ -964,7 +964,7 @@ router.post('/export/zip', async (req: Request, res: Response) => {
 });
 
 // POST /api/analyze/report-preview — Return rendered markdown as text (no download header)
-router.post('/report-preview', (req: Request, res: Response) => {
+router.post('/report-preview', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
   const { session_id, audience = 'general', tlp = 'AMBER', email_content_overrides } = req.body as {
     session_id: string;
@@ -973,10 +973,10 @@ router.post('/report-preview', (req: Request, res: Response) => {
     email_content_overrides?: Partial<AnalysisResult['email_content']>;
   };
   if (!session_id) { res.status(400).json({ error: 'session_id required' }); return; }
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
 
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string; analyst_overrides?: string } | undefined;
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string; analyst_overrides?: string } | undefined;
   if (!row) { res.status(404).json({ error: 'No analysis found' }); return; }
 
   let result: AnalysisResult;
@@ -995,7 +995,7 @@ router.post('/report-preview', (req: Request, res: Response) => {
   if (email_content_overrides) {
     result.email_content = { ...result.email_content, ...email_content_overrides };
   }
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || 'CTI Analyst';
   const orgName = settings.org_name || '';
   const sections = parseSections(settings.report_sections || '');
@@ -1020,12 +1020,12 @@ router.post('/export/report', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'session_id required' });
     return;
   }
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
 
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as
     { result_json: string; analyst_overrides?: string } | undefined;
-  const session = db.prepare('SELECT name, status FROM sessions WHERE id = ?').get(session_id) as
+  const session = (await db.prepare('SELECT name, status FROM sessions WHERE id = ?').get(session_id)) as
     { name: string; status: string } | undefined;
 
   if (!row) {
@@ -1049,7 +1049,7 @@ router.post('/export/report', async (req: Request, res: Response) => {
   if (email_content_overrides) {
     result.email_content = { ...result.email_content, ...email_content_overrides };
   }
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
 
   const analystName = settings.analyst_name || 'CTI Analyst';
   const orgName     = settings.org_name     || '';
@@ -1090,11 +1090,11 @@ router.post('/export/detection-rules', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'session_id required' });
     return;
   }
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
 
   const db = getDb();
-  const row = db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string } | undefined;
-  const session = db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id) as { name: string } | undefined;
+  const row = (await db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string } | undefined;
+  const session = (await db.prepare('SELECT name FROM sessions WHERE id = ?').get(session_id)) as { name: string } | undefined;
 
   if (!row) {
     res.status(404).json({ error: 'No analysis found' });
@@ -1120,7 +1120,7 @@ router.post('/export/detection-rules', async (req: Request, res: Response) => {
   const filename = `SNR-Detection-Rules-${shortId}-${date}.txt`;
   const text = formatDetectionRules(rules, session?.name ?? 'Incident', date, tlp ?? 'AMBER');
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || authReq.user.displayName;
 
   appendAuditLog({
@@ -1146,10 +1146,10 @@ router.post('/export/attack-flow', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'session_id required' });
     return;
   }
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
 
   const db = getDb();
-  const row = db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string } | undefined;
+  const row = (await db.prepare('SELECT result_json FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string } | undefined;
   if (!row) {
     res.status(404).json({ error: 'No analysis found' });
     return;
@@ -1173,7 +1173,7 @@ router.post('/export/attack-flow', async (req: Request, res: Response) => {
   const shortId = session_id.slice(0, 8);
   const filename = `SNR-AttackFlow-${shortId}-${date}.afb`;
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || authReq.user.displayName;
 
   appendAuditLog({
@@ -1199,10 +1199,10 @@ router.post('/export/iocs-csv', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'session_id required' });
     return;
   }
-  if (!verifySessionTeam(req, res, session_id)) return;
+  if (!(await verifySessionTeam(req, res, session_id))) return;
 
   const db = getDb();
-  const row = db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id) as { result_json: string; analyst_overrides?: string } | undefined;
+  const row = (await db.prepare('SELECT result_json, analyst_overrides FROM analysis_results WHERE session_id = ? ORDER BY version DESC LIMIT 1').get(session_id)) as { result_json: string; analyst_overrides?: string } | undefined;
   if (!row) return res.status(404).json({ error: 'No analysis found' });
 
   let result: AnalysisResult;
@@ -1238,7 +1238,7 @@ router.post('/export/iocs-csv', async (req: Request, res: Response) => {
   const shortId = session_id.slice(0, 8);
   const filename = `SNR-IOCs-${shortId}-${date}.csv`;
 
-  const settings = loadMergedSettings(authReq.teamId);
+  const settings = await loadMergedSettings(authReq.teamId);
   const analystName = settings.analyst_name || authReq.user.displayName;
 
   appendAuditLog({

@@ -23,9 +23,9 @@ router.post('/login', async (req, res) => {
     }
 
     const db = getDb();
-    const user = db.prepare(
-      'SELECT id, email, password_hash, display_name, role, disabled, failed_login_attempts, locked_until FROM users WHERE email = ? COLLATE NOCASE'
-    ).get(email.trim().toLowerCase()) as {
+    const user = (await db.prepare(
+      'SELECT id, email, password_hash, display_name, role, disabled, failed_login_attempts, locked_until FROM users WHERE LOWER(email) = LOWER(?)'
+    ).get(email.trim().toLowerCase())) as {
       id: string; email: string; password_hash: string; display_name: string; role: string;
       disabled: number; failed_login_attempts: number; locked_until: number;
     } | undefined;
@@ -55,11 +55,11 @@ router.post('/login', async (req, res) => {
         const newAttempts = (user.failed_login_attempts || 0) + 1;
         if (newAttempts >= MAX_FAILED_ATTEMPTS) {
           const lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
-          db.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?')
+          await db.prepare('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?')
             .run(newAttempts, lockedUntil, user.id);
           appendAuditLog({ analyst_name: user.email, user_id: user.id, action: 'account_locked', details: `Locked after ${newAttempts} failed attempts. IP: ${req.ip}` });
         } else {
-          db.prepare('UPDATE users SET failed_login_attempts = ? WHERE id = ?')
+          await db.prepare('UPDATE users SET failed_login_attempts = ? WHERE id = ?')
             .run(newAttempts, user.id);
         }
         appendAuditLog({ analyst_name: user.email, user_id: user.id, action: 'login_failed', details: `Attempt ${newAttempts}. IP: ${req.ip}` });
@@ -69,15 +69,15 @@ router.post('/login', async (req, res) => {
     }
 
     // Successful login — reset failed attempts
-    db.prepare('UPDATE users SET last_login_at = ?, failed_login_attempts = 0, locked_until = 0 WHERE id = ?')
+    await db.prepare('UPDATE users SET last_login_at = ?, failed_login_attempts = 0, locked_until = 0 WHERE id = ?')
       .run(Date.now(), user.id);
 
     // Load teams
-    const teams = db.prepare(`
+    const teams = (await db.prepare(`
       SELECT t.id, t.name, tm.role as team_role
       FROM teams t JOIN team_members tm ON t.id = tm.team_id
       WHERE tm.user_id = ?
-    `).all(user.id) as Array<{ id: string; name: string; team_role: string }>;
+    `).all(user.id)) as Array<{ id: string; name: string; team_role: string }>;
 
     const token = signAccessToken({ id: user.id, email: user.email, role: user.role });
     const refreshToken = signRefreshToken({ id: user.id, email: user.email, role: user.role });
@@ -102,7 +102,7 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /api/auth/refresh — no auth required, uses refresh token
-router.post('/refresh', (req, res) => {
+router.post('/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
@@ -124,13 +124,13 @@ router.post('/refresh', (req, res) => {
     }
 
     // Check if refresh token has been revoked
-    if (payload.jti && isTokenRevoked(payload.jti)) {
+    if (payload.jti && (await isTokenRevoked(payload.jti))) {
       res.status(401).json({ error: 'Token has been revoked' });
       return;
     }
 
     const db = getDb();
-    const user = db.prepare('SELECT id, email, role, disabled FROM users WHERE id = ?').get(payload.sub) as {
+    const user = (await db.prepare('SELECT id, email, role, disabled FROM users WHERE id = ?').get(payload.sub)) as {
       id: string; email: string; role: string; disabled: number;
     } | undefined;
 
@@ -141,7 +141,7 @@ router.post('/refresh', (req, res) => {
 
     // Revoke the consumed refresh token to prevent reuse
     if (payload.jti && payload.exp) {
-      revokeToken(payload.jti, payload.exp * 1000);
+      await revokeToken(payload.jti, payload.exp * 1000);
     }
 
     const newToken = signAccessToken({ id: user.id, email: user.email, role: user.role });
@@ -155,15 +155,15 @@ router.post('/refresh', (req, res) => {
 });
 
 // GET /api/auth/me — requires auth
-router.get('/me', requireAuth, (req, res) => {
+router.get('/me', requireAuth, async (req, res) => {
   const authReq = req as AuthenticatedRequest;
   const db = getDb();
 
-  const teams = db.prepare(`
+  const teams = (await db.prepare(`
     SELECT t.id, t.name, tm.role as team_role
     FROM teams t JOIN team_members tm ON t.id = tm.team_id
     WHERE tm.user_id = ?
-  `).all(authReq.user.id) as Array<{ id: string; name: string; team_role: string }>;
+  `).all(authReq.user.id)) as Array<{ id: string; name: string; team_role: string }>;
 
   res.json({
     user: {
@@ -194,7 +194,7 @@ router.patch('/me/password', requireAuth, async (req, res) => {
     }
 
     const db = getDb();
-    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(authReq.user.id) as { password_hash: string };
+    const user = (await db.prepare('SELECT password_hash FROM users WHERE id = ?').get(authReq.user.id)) as { password_hash: string };
 
     const valid = await verifyPassword(currentPassword, user.password_hash);
     if (!valid) {
@@ -204,7 +204,7 @@ router.patch('/me/password', requireAuth, async (req, res) => {
 
     const newHash = await hashPassword(newPassword);
     const now = Date.now();
-    db.prepare('UPDATE users SET password_hash = ?, updated_at = ?, password_changed_at = ? WHERE id = ?').run(newHash, now, now, authReq.user.id);
+    await db.prepare('UPDATE users SET password_hash = ?, updated_at = ?, password_changed_at = ? WHERE id = ?').run(newHash, now, now, authReq.user.id);
 
     // Revoke the current token to force re-login with new password
     const authHeader = req.headers.authorization;
@@ -212,7 +212,7 @@ router.patch('/me/password', requireAuth, async (req, res) => {
       try {
         const currentPayload = verifyToken(authHeader.slice(7));
         if (currentPayload.jti && currentPayload.exp) {
-          revokeToken(currentPayload.jti, currentPayload.exp * 1000);
+          await revokeToken(currentPayload.jti, currentPayload.exp * 1000);
         }
       } catch { /* token already expired — no action needed */ }
     }
@@ -227,7 +227,7 @@ router.patch('/me/password', requireAuth, async (req, res) => {
 });
 
 // POST /api/auth/logout — requires auth, revokes current token
-router.post('/logout', requireAuth, (req, res) => {
+router.post('/logout', requireAuth, async (req, res) => {
   try {
     const authReq = req as AuthenticatedRequest;
     const authHeader = req.headers.authorization;
@@ -235,7 +235,7 @@ router.post('/logout', requireAuth, (req, res) => {
       try {
         const payload = verifyToken(authHeader.slice(7));
         if (payload.jti && payload.exp) {
-          revokeToken(payload.jti, payload.exp * 1000);
+          await revokeToken(payload.jti, payload.exp * 1000);
         }
       } catch { /* token already expired — harmless */ }
     }

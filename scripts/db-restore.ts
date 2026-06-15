@@ -1,39 +1,52 @@
 #!/usr/bin/env tsx
 /**
- * SNR Database Restore Script
- * Usage: npm run db:restore -- <backup-file>
- * Restores snr.db from a backup file. Creates a safety backup of current DB first.
+ * SNR Database Restore Script (Postgres)
+ * Usage: npm run db:restore -- <backup-file.dump>
+ * Restores the database from a pg_dump custom-format snapshot via pg_restore.
+ * Requires DATABASE_URL and the `pg_restore` client binary on PATH.
+ *
+ * WARNING: this overwrites existing data (pg_restore --clean). Stop the server
+ * first. Take a fresh backup beforehand if in doubt.
  */
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { config } from 'dotenv';
+import { readSecret } from '../server/lib/secrets.js';
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const execFileAsync = promisify(execFile);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 config({ path: path.resolve(__dirname, '../.env') });
 
-const dbPath = path.resolve(process.env.DB_PATH ?? './snr.db');
-const backupDir = path.resolve(__dirname, '../backups');
+const backupDir = process.env.BACKUP_DIR
+  ? path.resolve(process.env.BACKUP_DIR)
+  : path.resolve(__dirname, '../backups');
+const databaseUrl = readSecret('DATABASE_URL');
+
+if (!databaseUrl) {
+  console.error('✗ DATABASE_URL is not set.');
+  process.exit(1);
+}
 
 const restoreFile = process.argv[2];
 
 if (!restoreFile) {
-  console.error('Usage: npm run db:restore -- <backup-file>');
+  console.error('Usage: npm run db:restore -- <backup-file.dump>');
   console.error('');
-
-  // List available backups
   if (fs.existsSync(backupDir)) {
-    const backups = fs.readdirSync(backupDir)
-      .filter(f => f.startsWith('snr-') && f.endsWith('.db'))
+    const backups = fs
+      .readdirSync(backupDir)
+      .filter((f) => f.startsWith('snr-') && f.endsWith('.dump'))
       .sort()
       .reverse();
-
     if (backups.length > 0) {
       console.error('Available backups:');
       for (const b of backups) {
         const stat = fs.statSync(path.join(backupDir, b));
-        const size = (stat.size / 1024).toFixed(1);
-        console.error(`  ${b}  (${size} KB)`);
+        console.error(`  ${b}  (${(stat.size / 1024).toFixed(1)} KB)`);
       }
     } else {
       console.error('No backups found.');
@@ -52,28 +65,15 @@ if (!fs.existsSync(sourcePath)) {
   process.exit(1);
 }
 
-// Safety backup of current DB
-if (fs.existsSync(dbPath)) {
-  const safetyPath = dbPath + '.pre-restore';
-  fs.copyFileSync(dbPath, safetyPath);
-  console.log(`✓ Safety backup of current DB: ${safetyPath}`);
+try {
+  await execFileAsync(
+    'pg_restore',
+    ['--clean', '--if-exists', '--no-owner', '-d', databaseUrl, sourcePath],
+    { maxBuffer: 64 * 1024 * 1024 }
+  );
+  console.log(`✓ Database restored from ${path.basename(sourcePath)}`);
+  console.log('  Restart the server to apply changes.');
+} catch (err) {
+  console.error('✗ Restore failed:', err instanceof Error ? err.message : err);
+  process.exit(1);
 }
-
-// Remove WAL/SHM from current DB
-for (const ext of ['-wal', '-shm']) {
-  const p = dbPath + ext;
-  if (fs.existsSync(p)) fs.unlinkSync(p);
-}
-
-// Restore
-fs.copyFileSync(sourcePath, dbPath);
-
-// Copy WAL if it exists in backup
-const sourceWal = sourcePath + '-wal';
-if (fs.existsSync(sourceWal)) {
-  fs.copyFileSync(sourceWal, dbPath + '-wal');
-}
-
-const size = (fs.statSync(dbPath).size / 1024).toFixed(1);
-console.log(`✓ Database restored from ${path.basename(sourcePath)} (${size} KB)`);
-console.log('  Restart the server to apply changes.');

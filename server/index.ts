@@ -5,9 +5,10 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { getDb, bootstrapAdmin } from './db/database.js';
+import { getDb, initDb, bootstrapAdmin, closeDb } from './db/database.js';
+import { pingDb } from './db/client.js';
 import { requireAuth, requireTeamMember } from './middleware/auth.js';
-import { cleanupRevokedTokens } from './lib/auth-utils.js';
+import { cleanupRevokedTokens, initAuthSecret } from './lib/auth-utils.js';
 import { readSecret } from './lib/secrets.js';
 import { startBackupScheduler } from './lib/backup.js';
 import { registry } from './lib/metrics.js';
@@ -115,8 +116,7 @@ app.use(express.urlencoded({ extended: false }));
 // Request logging
 app.use(requestLogger);
 
-// Initialize database on startup
-getDb();
+// Database is initialized asynchronously in start() before the server listens.
 
 // ── Auth routes (no auth middleware — login/refresh are public) ───────────
 // Apply strict rate limiting to login/refresh to prevent brute force
@@ -137,14 +137,13 @@ app.use('/api/search', requireAuth, requireTeamMember, searchRouter);
 
 // Health check (no auth — used for monitoring)
 const startedAt = Date.now();
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   try {
-    const db = getDb();
-    db.prepare('SELECT 1').get();
+    await pingDb();
     res.json({
       status: 'ok',
       uptime: Math.floor((Date.now() - startedAt) / 1000),
-      version: '1.0.0',
+      version: '3.0.0',
       llm: readSecret('ANTHROPIC_API_KEY') ? 'configured' : 'not_configured',
     });
   } catch {
@@ -153,13 +152,13 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Readiness probe (DB writable + migrations applied)
-app.get('/api/ready', (_req, res) => {
+app.get('/api/ready', async (_req, res) => {
   try {
     const db = getDb();
     // Verify read + write capability
-    db.exec("CREATE TABLE IF NOT EXISTS _health_check (id INTEGER PRIMARY KEY)");
-    db.prepare("INSERT OR REPLACE INTO _health_check (id) VALUES (1)").run();
-    db.prepare("DELETE FROM _health_check WHERE id = 1").run();
+    await db.exec('CREATE TABLE IF NOT EXISTS _health_check (id INTEGER PRIMARY KEY)');
+    await db.prepare('INSERT INTO _health_check (id) VALUES (1) ON CONFLICT (id) DO NOTHING').run();
+    await db.prepare('DELETE FROM _health_check WHERE id = 1').run();
     res.json({ status: 'ready' });
   } catch {
     res.status(503).json({ status: 'not_ready', error: 'database not writable' });
@@ -212,6 +211,12 @@ async function start() {
   // Validate critical config before doing anything else (prod only)
   validateProdConfig();
 
+  // Initialize the database (apply migrations, seed settings) before serving.
+  await initDb();
+
+  // Resolve and cache the JWT signing secret (keeps token sign/verify synchronous).
+  await initAuthSecret();
+
   // Bootstrap admin account on first run (idempotent)
   await bootstrapAdmin();
 
@@ -222,11 +227,9 @@ async function start() {
 
   // Periodic cleanup of revoked tokens (every hour)
   const cleanupInterval = setInterval(() => {
-    try {
-      cleanupRevokedTokens();
-    } catch (err) {
+    cleanupRevokedTokens().catch((err) => {
       logger.error({ err }, 'Failed to cleanup revoked tokens');
-    }
+    });
   }, 60 * 60 * 1000);
 
   // Scheduled database backups (consistent VACUUM INTO snapshots + retention)
@@ -237,12 +240,11 @@ async function start() {
     logger.info({ signal }, 'Received shutdown signal, closing gracefully…');
     clearInterval(cleanupInterval);
     stopBackups();
-    server.close(() => {
+    server.close(async () => {
       logger.info('HTTP server closed');
       try {
-        const db = getDb();
-        db.close();
-        logger.info('Database connection closed');
+        await closeDb();
+        logger.info('Database connection pool closed');
       } catch { /* DB may already be closed */ }
       process.exit(0);
     });

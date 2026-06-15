@@ -2,6 +2,10 @@ node_modules/
 dist/
 .env
 *.db
+*.db-wal
+*.db-shm
+*.dump
+backups/
 *.log
 unpacked_req/
 requirements_text.txt
