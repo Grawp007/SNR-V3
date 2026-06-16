@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, Save, Settings, Mail, User, Building2, ChevronDown, ChevronRight, Info, Brain, Users, Eye, Code2, Pencil, Plus, Trash2, FileText, LayoutList, Server } from 'lucide-react';
+import { X, Save, Settings, Mail, User, Building2, ChevronDown, ChevronRight, Info, Brain, Users, Eye, Code2, Pencil, Plus, Trash2, FileText, LayoutList, Server, GitPullRequest } from 'lucide-react';
 import ReportTemplateEditor from './ReportTemplateEditor';
 import EmailTemplateEditor from './EmailTemplateEditor';
 import SectionsEditor from './SectionsEditor';
@@ -51,7 +51,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = 'llm_provider' | 'identity' | 'email_template' | 'email_layout' | 'brief_sections' | 'cc_lists' | 'audience_intros' | 'audience_prompts' | 'report_template';
+type Section = 'llm_provider' | 'identity' | 'email_template' | 'email_layout' | 'brief_sections' | 'cc_lists' | 'audience_intros' | 'audience_prompts' | 'report_template' | 'detection_as_code';
 
 const AUDIENCE_KEYS = [
   { key: 'purple_team', label: 'Purple Team' },
@@ -1165,6 +1165,62 @@ export default function SettingsModal({ open, onClose }: Props) {
                 onChange={(v) => set('report_template', v)}
                 sections={briefSections}
               />
+            </Accordion>
+
+            {/* ── Detection-as-Code (GitHub) ── */}
+            <Accordion
+              id="detection_as_code"
+              label="Detection-as-Code (GitHub)"
+              icon={<GitPullRequest className="w-3.5 h-3.5" />}
+              open={openSection === 'detection_as_code'}
+              onToggle={() => toggle('detection_as_code')}
+            >
+              <p className="text-xs text-muted-foreground mb-3">
+                Publish a session's Sigma/YARA/Suricata rules and report to a Git repo as a
+                pull request. Set a GitHub repo and a personal access token with <strong className="text-foreground/70">repo</strong> scope.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <EditableField
+                  label="GitHub Repository"
+                  help="owner/repo, e.g. acme-soc/detections"
+                  value={settings['dac_github_repo'] ?? ''}
+                  onChange={(v) => set('dac_github_repo', v)}
+                  isEditing={editingFields.has('dac_github_repo')}
+                  onToggleEdit={() => toggleEdit('dac_github_repo')}
+                  placeholder="owner/repo"
+                  singleLine
+                />
+                <EditableField
+                  label="Base Branch"
+                  help="PRs target this branch (default: main)"
+                  value={settings['dac_github_branch'] ?? ''}
+                  onChange={(v) => set('dac_github_branch', v)}
+                  isEditing={editingFields.has('dac_github_branch')}
+                  onToggleEdit={() => toggleEdit('dac_github_branch')}
+                  placeholder="main"
+                  singleLine
+                />
+                <EditableField
+                  label="GitHub Token"
+                  help="PAT with repo scope — stored server-side, never shown again"
+                  value={settings['dac_github_token'] ?? ''}
+                  onChange={(v) => set('dac_github_token', v)}
+                  isEditing={editingFields.has('dac_github_token')}
+                  onToggleEdit={() => toggleEdit('dac_github_token')}
+                  placeholder="ghp_…"
+                  singleLine
+                />
+                <EditableField
+                  label="Path Prefix"
+                  help="Folder root for rules/reports (default: detections)"
+                  value={settings['dac_path_prefix'] ?? ''}
+                  onChange={(v) => set('dac_path_prefix', v)}
+                  isEditing={editingFields.has('dac_path_prefix')}
+                  onToggleEdit={() => toggleEdit('dac_path_prefix')}
+                  placeholder="detections"
+                  singleLine
+                />
+              </div>
             </Accordion>
 
           </div>

@@ -1066,3 +1066,17 @@ export async function pollFeedNow(id: string): Promise<{ fetched: number; ingest
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Feed poll failed');
   return res.json();
 }
+
+// ── Detection-as-code publishing ─────────────────────────────────────────────
+
+export async function getPublishStatus(): Promise<{ configured: boolean; repo: string | null; branch: string | null }> {
+  const res = await authFetch(`${BASE}/publish/status`);
+  if (!res.ok) throw new Error('Failed to load publish status');
+  return res.json();
+}
+
+export async function publishDetections(sessionId: string): Promise<{ prUrl: string; prNumber: number; files: string[]; updated: boolean }> {
+  const res = await authFetch(`${BASE}/publish/${sessionId}`, { method: 'POST' });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Publish failed');
+  return res.json();
+}

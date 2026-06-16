@@ -27,6 +27,7 @@ import searchRouter from './routes/search.js';
 import keysRouter from './routes/keys.js';
 import v1Router from './routes/v1.js';
 import feedsRouter from './routes/feeds.js';
+import publishRouter from './routes/publish.js';
 import { startFeedScheduler } from './lib/feeds/scheduler.js';
 import { requireApiKey, type ServiceAuthRequest } from './middleware/apiKey.js';
 
@@ -157,6 +158,7 @@ app.use('/api/search', requireAuth, requireTeamMember, searchRouter);
 
 // ── Threat-intel feeds (JWT, team-scoped) ────────────────────────────────
 app.use('/api/feeds', requireAuth, requireTeamMember, feedsRouter);
+app.use('/api/publish', requireAuth, requireTeamMember, publishRouter);
 
 // ── API key management (admin, JWT) ──────────────────────────────────────
 app.use('/api/keys', requireAuth, requireRole('admin'), requireTeamMember, keysRouter);

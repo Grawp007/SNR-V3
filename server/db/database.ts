@@ -102,6 +102,12 @@ async function seedDefaultSettings(): Promise<void> {
     api_base_url: '', // e.g. http://localhost:11434/v1 for Ollama
     api_key: '', // provider API key; falls back to ANTHROPIC_API_KEY env var
     model_name: '', // e.g. llama3.2; falls back to CLAUDE_MODEL env var
+    // Detection-as-code (GitHub) publishing target. dac_github_token is masked
+    // to the frontend by the sensitive-key filter (matches /token/).
+    dac_github_repo: '', // owner/repo
+    dac_github_branch: '', // base branch (default 'main' when empty)
+    dac_github_token: '', // GitHub PAT with repo scope
+    dac_path_prefix: '', // folder root for rules/reports (default 'detections')
   };
   const now = Date.now();
   for (const [key, value] of Object.entries(defaults)) {

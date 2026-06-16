@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, Package, Mail, Map, Shield, Pencil, Eye, RotateCcw, ChevronLeft, ChevronRight, FileText, Radar } from 'lucide-react';
+import { Download, Package, Mail, Map, Shield, Pencil, Eye, RotateCcw, ChevronLeft, ChevronRight, FileText, Radar, GitPullRequest } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { Button } from './ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
@@ -73,6 +73,20 @@ export default function RightPanel({ sessionId, result, audience, onAudienceChan
       onShowToast?.(`${label} downloaded successfully`, 'success');
     } catch (e) {
       onShowToast?.(`Export failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  // Publish detection rules + report to GitHub as a pull request (detection-as-code).
+  const publishToGit = async () => {
+    setExporting('publish');
+    try {
+      const r = await api.publishDetections(sessionId!);
+      onShowToast?.(`Detections ${r.updated ? 'updated in' : 'published as'} PR #${r.prNumber}`, 'success');
+      window.open(r.prUrl, '_blank', 'noopener');
+    } catch (e) {
+      onShowToast?.(`Publish failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
     } finally {
       setExporting(null);
     }
@@ -325,6 +339,16 @@ export default function RightPanel({ sessionId, result, audience, onAudienceChan
             >
               <Download className="w-3.5 h-3.5" />
               {exporting === 'rules' ? 'Exporting…' : 'Download Rules (.txt)'}
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full text-xs h-8 mt-2 gap-1.5"
+              disabled={disabled || !!exporting || !result?.detection_rules?.length}
+              onClick={publishToGit}
+              title="Open/update a GitHub pull request with these rules + report (configure in Settings → Detection-as-Code)"
+            >
+              <GitPullRequest className="w-3.5 h-3.5" />
+              {exporting === 'publish' ? 'Publishing…' : 'Publish to Git (PR)'}
             </Button>
           </TabsContent>
 
