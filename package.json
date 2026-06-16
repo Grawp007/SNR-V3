@@ -19,7 +19,8 @@
     "test:watch": "vitest",
     "db:backup": "tsx scripts/db-backup.ts",
     "db:restore": "tsx scripts/db-restore.ts",
-    "migrate:sqlite": "tsx scripts/sqlite-to-postgres.ts"
+    "migrate:sqlite": "tsx scripts/sqlite-to-postgres.ts",
+    "check:actors": "tsx scripts/check-actors.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
