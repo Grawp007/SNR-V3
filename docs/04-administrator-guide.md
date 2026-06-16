@@ -71,6 +71,7 @@ Open **Settings** (gear icon). Sections:
 | **CTI Report Template** | The Markdown report layout, using `{field}` and `{{BLOCK}}` tokens (`{{SECTIONS}}`, `{{ATTACK_TABLE}}`, `{{ATTACK_CHAIN}}`, `{{IOC_TABLE}}`, `{{EMAIL_IOCS}}`, `{{AFFECTED_ASSETS_TABLE}}`, `{{THREAT_ACTOR}}`, `{{CAMPAIGN_TIMELINE}}`). Empty = built-in structured report. |
 | **CC / BCC Lists per Audience** | Comma-separated recipient lists per audience, written into the exported `.eml`. |
 | **Prompt Engineering** | Advanced overrides: **System Prompt**, **Technical Extraction Instructions** (Phase 1), and **Stakeholder Brief Template** (Phase 2, supports `{audience}`, `{date}`, `{audience_guidance}`, `{section_guidance}`, `{technical_findings}`). |
+| **Detection-as-Code (GitHub)** | GitHub **repo**, **base branch**, **token** (PAT with repo scope, masked), and **path prefix** for publishing rules + reports as pull requests. See [8. Detection-as-Code](./08-detection-as-code.md). |
 
 > **Email Template vs. Email Branding:** *Template* controls the body **layout/content
 > order** (tokens); *Branding* controls the **look** (colors, logo, fonts, header/footer).
@@ -89,10 +90,22 @@ Open **Settings** (gear icon). Sections:
 
 Full control set: [SECURITY.md](../SECURITY.md).
 
-## 4.6 Operations
+## 4.6 Integration, feeds & detection-as-code
 
-Installation, TLS, scheduled backups & restore, Prometheus `/metrics`, secrets
-(`*_FILE`), and the hardening checklist live in the **[Deployment Guide](../DEPLOYMENT.md)**.
+Two admin-panel tabs and one settings section extend SNR into an enterprise stack:
+
+- **Admin Panel → API Keys** — create service accounts and mint scoped API keys so
+  other systems can submit/fetch analyses. See [7. Integration API](./07-integration-api.md).
+- **Admin Panel → Threat Feeds** — add TAXII/MISP/RSS sources that are polled on a
+  cadence and auto-analyzed. See [7.4 Threat-intel feeds](./07-integration-api.md#74-threat-intel-feeds).
+- **Settings → Detection-as-Code** — publish a session's rules + report to GitHub as a
+  pull request. See [8. Detection-as-Code](./08-detection-as-code.md).
+
+## 4.7 Operations
+
+Installation, Postgres, the background worker, TLS, scheduled `pg_dump` backups &
+restore, Prometheus `/metrics` (+ Grafana dashboard), secrets (`*_FILE`), scaling,
+and the hardening checklist live in the **[Deployment Guide](../DEPLOYMENT.md)**.
 Programmatic access is documented in the **[API Reference](../API.md)**.
 
 ---

@@ -3,7 +3,7 @@
 **Signal to Noise (SNR)** — AI-powered Cyber Threat Intelligence workbench.
 This manual explains how to operate SNR end to end, for analysts and administrators.
 
-> Version: 1.0 · Applies to SNR 1.x · Last reviewed against the shipping build.
+> Version: 3.0 · Applies to SNR V3 · Last reviewed against the shipping build.
 
 ---
 
@@ -14,6 +14,7 @@ This manual explains how to operate SNR end to end, for analysts and administrat
 | **New to SNR** | [1. Overview](./01-overview.md) → [2. Getting Started](./02-getting-started.md) |
 | **An analyst** (running analyses, producing intel) | [3. Analyst Guide](./03-analyst-guide.md) |
 | **An administrator** (users, teams, settings, templates) | [4. Administrator Guide](./04-administrator-guide.md) |
+| **Integrating other systems** (API keys, feeds, detection-as-code) | [7. Integration API](./07-integration-api.md) · [8. Detection-as-Code](./08-detection-as-code.md) |
 | **Looking something up** | [5. Reference](./05-reference.md) · [6. Troubleshooting & FAQ](./06-troubleshooting.md) |
 | **Installing / operating the server** | [DEPLOYMENT.md](../DEPLOYMENT.md) |
 | **Integrating via API** | [API.md](../API.md) |
@@ -27,6 +28,8 @@ This manual explains how to operate SNR end to end, for analysts and administrat
 4. [Administrator Guide](./04-administrator-guide.md) — roles, users, teams, and every Settings section
 5. [Reference](./05-reference.md) — glossary, shortcuts, export formats, audiences, template tokens, env vars
 6. [Troubleshooting & FAQ](./06-troubleshooting.md) — common issues and answers
+7. [Integration API & Feeds](./07-integration-api.md) — API keys, programmatic submit/fetch, webhooks, threat-intel feeds
+8. [Detection-as-Code](./08-detection-as-code.md) — publish rules + reports to GitHub as pull requests
 
 ## Related documentation
 

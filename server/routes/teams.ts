@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { getDb, loadMergedSettings } from '../db/database.js';
+import { getDb, loadMergedSettings, invalidateSettingsCache } from '../db/database.js';
 import { requireRole, requireTeamMember, type AuthenticatedRequest } from '../middleware/auth.js';
 import type { Request, Response } from 'express';
 import logger from '../lib/logger.js';
@@ -277,6 +277,7 @@ router.patch('/:id/settings', async (req: Request, res: Response) => {
     await db.prepare('INSERT INTO team_settings (team_id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (team_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at').run(teamId, key, value, now);
   }
 
+  invalidateSettingsCache();
   res.json({ ok: true });
 });
 

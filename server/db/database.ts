@@ -198,11 +198,27 @@ export async function bootstrapAdmin(): Promise<boolean> {
 
 // ── Settings helpers ───────────────────────────────────────────────────────
 
+// Small in-process cache for merged settings. Settings change rarely (admin
+// actions) but are read on every analyze/export/preview, so a short TTL plus
+// explicit invalidation on write avoids two DB round-trips per read. Callers get
+// a fresh shallow copy so they can't mutate the cached object.
+const SETTINGS_TTL_MS = parseInt(process.env.SETTINGS_CACHE_TTL_MS ?? '30000', 10);
+const settingsCache = new Map<string, { value: Record<string, string>; exp: number }>();
+
+/** Clear the merged-settings cache (call after any settings write). */
+export function invalidateSettingsCache(): void {
+  settingsCache.clear();
+}
+
 /**
  * Load settings with team-level overrides merged on top of org defaults.
  * If teamId is empty/undefined, returns only global settings.
  */
 export async function loadMergedSettings(teamId?: string): Promise<Record<string, string>> {
+  const cacheKey = teamId || '__global__';
+  const cached = settingsCache.get(cacheKey);
+  if (cached && cached.exp > Date.now()) return { ...cached.value };
+
   const db = getDb();
 
   // Global (org-wide) settings
@@ -221,7 +237,8 @@ export async function loadMergedSettings(teamId?: string): Promise<Record<string
     for (const r of teamRows) merged[r.key] = r.value;
   }
 
-  return merged;
+  settingsCache.set(cacheKey, { value: merged, exp: Date.now() + SETTINGS_TTL_MS });
+  return { ...merged };
 }
 
 // ── Audit log ──────────────────────────────────────────────────────────────

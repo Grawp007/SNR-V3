@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { getDb, loadMergedSettings } from '../db/database.js';
+import { getDb, loadMergedSettings, invalidateSettingsCache } from '../db/database.js';
 import type { Request, Response } from 'express';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import logger from '../lib/logger.js';
@@ -76,6 +76,7 @@ router.patch('/', async (req: Request, res: Response) => {
     }
   }
 
+  invalidateSettingsCache();
   res.json({ ok: true });
 });
 
@@ -93,6 +94,7 @@ router.post('/logo', logoUpload.single('logo'), async (req: Request, res: Respon
     await db.prepare(UPSERT_GLOBAL_SETTING).run('email_logo_data', dataUri, Date.now());
   }
 
+  invalidateSettingsCache();
   res.json({ ok: true, dataUri });
 });
 
@@ -107,6 +109,7 @@ router.delete('/logo', async (req: Request, res: Response) => {
     await db.prepare(UPSERT_GLOBAL_SETTING).run('email_logo_data', '', Date.now());
   }
 
+  invalidateSettingsCache();
   res.json({ ok: true });
 });
 

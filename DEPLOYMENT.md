@@ -1,19 +1,22 @@
-# SNR — On-Prem Deployment Guide
+# SNR V3 — On-Prem Deployment Guide
 
 Self-hosted deployment of SNR (Signal-to-Noise) for an enterprise security program.
-SNR is a single Node service that serves both the REST API and the built web UI,
-backed by an embedded SQLite database. A reverse proxy in front terminates TLS.
+V3 runs on **Postgres** with an **asynchronous worker**: the API stays responsive
+while LLM analysis runs as background jobs that survive restarts and scale out.
 
 ## Architecture
 
 ```
-            ┌────────────┐      ┌──────────────────────────┐
-  HTTPS ───▶│   Caddy    │────▶ │  app (SNR)               │
-            │ (TLS, :443)│ :3001│  API + UI, Node 22       │
-            └────────────┘      │  SQLite @ /data/snr.db   │
-                                │  backups @ /data/backups │
-                                └──────────────────────────┘
-                                         volume: snr-data
+            ┌────────────┐     ┌──────────────────────┐
+  HTTPS ───▶│   Caddy    │───▶ │  app  (API + UI)     │──┐
+            │ (TLS :443) │:3001│  Node 22             │  │ enqueue / read
+            └────────────┘     └──────────────────────┘  │
+                                ┌──────────────────────┐  ▼   ┌────────────┐
+                                │  worker(s)           │◀────▶│  postgres  │
+                                │  LLM analysis jobs   │      │ (pg-boss + │
+                                └──────────────────────┘      │  app data) │
+                                                              └────────────┘
+   volumes:  snr-pgdata (database)   ·   snr-data (pg_dump backups)
 ```
 
 ## Prerequisites
@@ -29,93 +32,105 @@ cp .env.example .env
 #   JWT_SECRET           (node -e "console.log(require('crypto').randomBytes(64).toString('hex'))")
 #   ALLOWED_ORIGINS      e.g. https://snr.yourorg.com
 #   ANTHROPIC_API_KEY    (or LLM_PROVIDER=openai-compatible + API_BASE_URL)
+#   POSTGRES_PASSWORD    (used to build DATABASE_URL for app + worker)
 #   A2N_ADMIN_EMAIL / A2N_ADMIN_PASSWORD   (first-run admin)
 #   SNR_DOMAIN           your domain (or "localhost" for a self-signed cert)
 
 docker compose up -d
-docker compose logs -f app      # watch startup
+docker compose logs -f app worker     # watch startup + migrations
 ```
-Then browse to `https://<SNR_DOMAIN>` and log in with the bootstrap admin.
+Then browse to `https://<SNR_DOMAIN>` and log in with the bootstrap admin. The
+`postgres`, `app`, `worker`, and `caddy` services come up together; migrations
+apply automatically (serialized across app+worker via a Postgres advisory lock).
 
-To run **without** the bundled proxy (front SNR with your own LB/proxy): delete the
-`caddy` service from `docker-compose.yml`, publish `app`'s `3001`, and set
-`TRUST_PROXY` to your proxy depth.
+To run **without** the bundled proxy: delete the `caddy` service, publish `app`'s
+`3001`, and set `TRUST_PROXY` to your proxy depth.
+
+## Migrating from a V2 (SQLite) install
+```bash
+docker compose up -d postgres           # start just the DB
+# from a checkout with deps installed, pointed at the same DATABASE_URL:
+DATABASE_URL=postgres://snr:<pw>@localhost:5432/snr npm run migrate:sqlite -- /path/to/snr.db
+docker compose up -d                    # bring up the rest
+```
+The importer is idempotent (re-runnable) and carries users, teams, sessions,
+results, threat actors, audit log, and settings forward.
 
 ## Configuration reference
 
 | Variable | Default | Notes |
 |---|---|---|
-| `NODE_ENV` | `development` | Set `production` in deployment (compose does this). |
-| `PORT` | `3001` | App listen port. |
-| `HOST` | dev `127.0.0.1` / prod `0.0.0.0` | Bind address. |
-| `TRUST_PROXY` | dev off / prod `1` | Reverse-proxy hops to trust (real client IP, rate limiting). |
-| `DB_PATH` | `./snr.db` | Use an absolute path on a persistent volume (compose: `/data/snr.db`). |
+| `NODE_ENV` | `development` | Compose sets `production`. |
+| `DATABASE_URL` / `_FILE` | — | **Required.** Postgres connection string. Compose builds it from `POSTGRES_*`. |
+| `POSTGRES_USER`/`POSTGRES_DB` | `snr` | Compose postgres service. |
+| `POSTGRES_PASSWORD` | — | **Required** for compose. |
+| `DB_POOL_MAX` | `10` | Max Postgres connections per process. |
+| `ANALYSIS_WORKER_CONCURRENCY` | `2` | Parallel analyses per worker process. |
+| `PORT` / `HOST` | `3001` / prod `0.0.0.0` | App listen port / bind address. |
+| `TRUST_PROXY` | prod `1` | Reverse-proxy hops to trust. |
 | `ALLOWED_ORIGINS` | — | **Required in prod.** Comma-separated CORS origins. |
 | `JWT_SECRET` / `_FILE` | — | **Required in prod.** 64-byte hex recommended. |
-| `ANTHROPIC_API_KEY` / `_FILE` | — | LLM key (or use an OpenAI-compatible provider). |
-| `A2N_ADMIN_EMAIL` / `_FILE` | — | First-run admin (only used when no users exist). |
-| `A2N_ADMIN_PASSWORD` / `_FILE` | — | First-run admin password (complexity enforced). |
-| `BACKUP_INTERVAL_HOURS` | `24` | `0` disables scheduled backups. |
-| `BACKUP_RETENTION` | `7` | Newest N snapshots kept. |
-| `BACKUP_DIR` | `<DB dir>/backups` | Snapshot location. |
-| `LOG_LEVEL` | `info` (prod) | pino level. Logs are JSON on stdout. |
+| `ANTHROPIC_API_KEY` / `_FILE` | — | LLM key (or an OpenAI-compatible provider). |
+| `A2N_ADMIN_EMAIL` / `A2N_ADMIN_PASSWORD` (`_FILE`) | — | First-run admin. |
+| `FEED_POLL_INTERVAL_SECONDS` | `60` | Threat-intel feed scheduler tick (`0` disables). |
+| `SNR_WEBHOOK_SECRET` / `_FILE` | — | If set, integration-API webhooks are HMAC-signed. |
+| `BACKUP_INTERVAL_HOURS` / `BACKUP_RETENTION` | `24` / `7` | `pg_dump` cadence / retention (`0` disables). |
+| `BACKUP_DIR` | `/data/backups` | Snapshot location. |
+| `WORKER_METRICS_PORT` | `9091` | Worker Prometheus port. |
 | `METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>`. |
 | `SNR_DOMAIN` | `localhost` | Domain for the Caddy TLS proxy. |
 
 Any secret supports a `*_FILE` variant pointing at a mounted file (Docker/K8s
-secrets); the file's contents take precedence over the plain variable.
+secrets); the file's contents take precedence.
 
 ## TLS
-- **Public domain:** set `SNR_DOMAIN` to your FQDN; Caddy auto-provisions a
-  Let's Encrypt certificate (ports 80/443 must be reachable).
-- **Internal CA / provided cert:** edit `deploy/Caddyfile` to
-  `tls /path/cert.pem /path/key.pem`, and mount the cert into the caddy service.
-- **Your own proxy:** terminate TLS there and proxy to `app:3001`; keep
-  `TRUST_PROXY` aligned with the number of proxies.
+- **Public domain:** set `SNR_DOMAIN`; Caddy auto-provisions Let's Encrypt (ports 80/443 reachable).
+- **Internal CA / provided cert:** edit `deploy/Caddyfile` → `tls /path/cert.pem /path/key.pem` and mount it.
+- **Your own proxy:** terminate TLS there, proxy to `app:3001`, align `TRUST_PROXY`.
 
 ## Observability
-- **Logs:** structured JSON on stdout (secrets redacted). Ship with your existing
-  collector (Fluent Bit / Vector / Splunk UF) and forward to your SIEM.
-- **Metrics:** Prometheus text at `GET /metrics` (process metrics plus
-  `snr_http_requests_total`, `snr_analysis_runs_total`, `snr_analysis_duration_seconds`).
-  Protect it with `METRICS_TOKEN` and scrape over the internal network.
-- **Health:** `GET /api/health` (liveness) and `GET /api/ready` (DB read/write).
-  The container `HEALTHCHECK` uses `/api/health`.
+- **Metrics:** Prometheus at `GET /metrics` on the **app** (HTTP, queue depth) and on
+  each **worker** (`WORKER_METRICS_PORT`; job success/fail, durations, feeds). Import
+  [deploy/grafana-dashboard.json](./deploy/grafana-dashboard.json). Protect with `METRICS_TOKEN`.
+- **Health:** `GET /api/health` (liveness), `GET /api/ready` (DB read/write).
+- **Logs:** structured JSON on stdout (secrets redacted) — ship to your SIEM.
 
 ## Backups & restore
-- Scheduled snapshots use SQLite `VACUUM INTO` (consistent even with WAL active),
-  written to `BACKUP_DIR` (default `/data/backups`) and pruned to `BACKUP_RETENTION`.
-- **Manual snapshot:** `docker compose exec app npm run db:backup`.
+- Scheduled snapshots use `pg_dump` (custom format), written to `BACKUP_DIR` and
+  pruned to `BACKUP_RETENTION`. The image bundles `postgresql-client-16`.
+- **Manual snapshot:** `docker compose exec app sh -c 'pg_dump -d "$DATABASE_URL" -Fc --no-owner -f /data/backups/manual.dump'`
 - **Restore:**
   ```bash
-  docker compose stop app
-  # copy a snapshot from /data/backups over /data/snr.db (and remove -wal/-shm)
-  docker run --rm -v snr_snr-data:/data busybox sh -c \
-    "cp /data/backups/snr-<timestamp>.db /data/snr.db && rm -f /data/snr.db-wal /data/snr.db-shm"
-  docker compose start app
+  # stop the writers; keep postgres up
+  docker compose stop app worker
+  docker compose exec postgres sh -c 'pg_restore --clean --if-exists --no-owner -d "postgres://snr:$POSTGRES_PASSWORD@localhost/snr" /path/to.dump'
+  # (or run `npm run db:restore -- <file.dump>` from a checkout pointed at DATABASE_URL)
+  docker compose start app worker
   ```
 
 ## Upgrades
 ```bash
-git pull            # or pull a new image tag
-docker compose build app
-docker compose up -d app
+git pull                      # or pull a new image tag
+docker compose build app worker
+docker compose up -d
 ```
-The DB volume persists; schema migrations apply automatically on startup. Take a
-backup first (`npm run db:backup`).
+Postgres data persists; migrations apply automatically on startup. Take a `pg_dump`
+backup first.
+
+## Scaling
+- **Throughput:** raise `ANALYSIS_WORKER_CONCURRENCY`, or run multiple `worker`
+  containers (`docker compose up -d --scale worker=3`). Jobs are distributed via
+  pg-boss; the API is unaffected.
+- **Tune** `DB_POOL_MAX` alongside worker concurrency, and load-test with
+  `npm run loadtest -- <n> --wait` (needs an API key).
 
 ## Hardening checklist
 - [ ] `JWT_SECRET` set explicitly (64-byte hex); rotate periodically.
 - [ ] `ALLOWED_ORIGINS` restricted to your real UI origin(s).
-- [ ] Run behind TLS; never expose `app:3001` directly to clients.
-- [ ] Secrets mounted as files (`*_FILE`), not inline in `.env`, where possible.
-- [ ] `/metrics` protected with `METRICS_TOKEN` and not internet-exposed.
-- [ ] stdout logs shipped to your SIEM; alert on repeated 401/lockout events.
-- [ ] `snr-data` volume included in your infrastructure backup/DR plan.
-- [ ] Bootstrap admin password rotated after first login; create per-analyst accounts.
-
-## Scaling note
-This deployment is **single-node** (embedded SQLite in WAL mode + consistent
-snapshots), which is appropriate for typical on-prem CTI workloads. Horizontal
-scaling / HA would require migrating to a networked database (e.g. Postgres) and
-is tracked as a separate initiative.
+- [ ] Run behind TLS; never expose `app:3001` or `postgres` directly to clients.
+- [ ] Secrets mounted as files (`*_FILE`) where possible; strong `POSTGRES_PASSWORD`.
+- [ ] `/metrics` protected with `METRICS_TOKEN`; worker metrics port not internet-exposed.
+- [ ] `SNR_WEBHOOK_SECRET` set so integration webhooks are verifiable.
+- [ ] API keys scoped minimally; rotate/revoke from Admin → API Keys.
+- [ ] `snr-pgdata` (and `snr-data` backups) in your DR plan; test a restore.
+- [ ] Bootstrap admin password rotated after first login; per-analyst accounts created.

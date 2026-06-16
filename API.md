@@ -1,145 +1,102 @@
-# SNR — API Reference
+# SNR V3 — API Reference
 
-Base URL: `http://127.0.0.1:3001`
+Base URL: `https://<your-host>` (dev: `http://127.0.0.1:3001`)
 
-All endpoints return JSON unless noted. Auth endpoints issue JWTs; all other endpoints require a valid `Authorization: Bearer <token>` header.
+SNR exposes two API surfaces:
+
+- **Web/UI API** (`/api/*`) — authenticated with a **JWT** (`Authorization: Bearer <jwt>`); used by the SNR web app. Team context is set with the `X-Team-Id` header.
+- **Integration API** (`/api/v1/*`) — authenticated with a **service API key** (`Authorization: Bearer snr_…` or `X-API-Key: snr_…`); for programmatic use by other systems. Team scope is implied by the key.
+
+All endpoints return JSON unless noted.
 
 ---
 
-## Health & Readiness (No Auth)
+## Health, readiness & metrics (no auth)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Health check — returns `{ status, uptime, version, llm }` |
-| GET | `/api/ready` | Readiness probe — verifies DB read/write |
+| GET | `/api/health` | Liveness — `{ status, uptime, version, llm }` |
+| GET | `/api/ready` | Readiness — verifies DB read/write |
+| GET | `/metrics` | Prometheus metrics (optionally gated by `METRICS_TOKEN`) |
+| GET | `/api/v1/openapi.json` | OpenAPI 3 spec for the integration API |
+
+The **worker** process exposes its own `/metrics` on `WORKER_METRICS_PORT` (default 9091).
 
 ---
 
-## Authentication (`/api/auth`)
+## Integration API (`/api/v1`) — machine auth
 
-| Method | Endpoint | Body | Response | Auth | Notes |
-|--------|----------|------|----------|------|-------|
-| POST | `/api/auth/login` | `{ email, password }` | `{ token, refreshToken, user, teams }` | No | 5 req/15min |
-| POST | `/api/auth/refresh` | `{ refreshToken }` | `{ token, refreshToken }` | No | 5 req/15min |
-| GET | `/api/auth/me` | — | `{ user, teams }` | Yes | Current user profile |
-| PATCH | `/api/auth/me/password` | `{ currentPassword, newPassword }` | `{ ok, message }` | Yes | 5 req/1hr |
-| POST | `/api/auth/logout` | — | `{ ok }` | Yes | Revokes current token |
+Authenticate with an API key minted by an admin (Admin Panel → **API Keys**, or `POST /api/keys/...`). Keys carry **scopes** and a **per-key rate limit** (default 60/min). All access is scoped to the key's team.
 
----
+| Scope | Grants |
+|---|---|
+| `analyze:write` | Submit analyses |
+| `sessions:read` | Read status & results |
+| `export:read` | Fetch exports |
 
-## Users (`/api/users`) — Admin Only
+### Submit an analysis
+`POST /api/v1/analyze` — scope `analyze:write` → **202**
 
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| GET | `/api/users` | — | `[ user, ... ]` |
-| POST | `/api/users` | `{ email, password, displayName, role? }` | `{ id, email, ... }` |
-| GET | `/api/users/:id` | — | user object |
-| PATCH | `/api/users/:id` | `{ displayName?, role?, disabled? }` | `{ ok }` |
-| PATCH | `/api/users/:id/password` | `{ newPassword }` | `{ ok }` |
-| DELETE | `/api/users/:id` | — | `{ ok }` (soft-disable) |
-
----
-
-## Teams (`/api/teams`)
-
-| Method | Endpoint | Body | Response | Auth |
-|--------|----------|------|----------|------|
-| GET | `/api/teams` | — | `[ team, ... ]` | Yes |
-| POST | `/api/teams` | `{ name, description? }` | `{ id, name, ... }` | Admin |
-| GET | `/api/teams/:id` | — | team + members | Yes |
-| PATCH | `/api/teams/:id` | `{ name?, description? }` | `{ ok }` | Admin/Lead |
-| DELETE | `/api/teams/:id` | — | `{ ok }` | Admin |
-| POST | `/api/teams/:id/members` | `{ userId, role? }` | `{ ok }` | Admin/Lead |
-| PATCH | `/api/teams/:id/members/:userId` | `{ role }` | `{ ok }` | Admin/Lead |
-| DELETE | `/api/teams/:id/members/:userId` | — | `{ ok }` | Admin/Lead |
-| GET | `/api/teams/:id/settings` | — | merged settings | Yes |
-| PATCH | `/api/teams/:id/settings` | `{ key: value }` | `{ ok }` | Admin/Lead |
-
----
-
-## Sessions (`/api/sessions`) — Requires Team Membership
-
-| Method | Endpoint | Body | Response | Notes |
-|--------|----------|------|----------|-------|
-| GET | `/api/sessions` | Query: `limit?=20, offset?=0` | `{ sessions, total, limit, offset }` | Paginated |
-| POST | `/api/sessions` | `{ name?, incident_id?, audience? }` | `{ id }` | Create before analysis |
-| GET | `/api/sessions/:id` | — | `{ session, result, analystOverrides, inputs, note }` | Full detail |
-| PATCH | `/api/sessions/:id/name` | `{ name }` | `{ ok }` | Rename |
-| PATCH | `/api/sessions/:id/note` | `{ content }` | `{ ok }` | Save analyst note |
-| PATCH | `/api/sessions/:id/overrides` | `{ overrides, expectedVersion? }` | `{ ok }` | Optimistic locking |
-| DELETE | `/api/sessions/:id` | — | `{ ok }` | Creator/Lead/Admin |
-| GET | `/api/sessions/audit/log` | — | `{ rows }` | Last 100 entries |
-
----
-
-## Analysis (`/api/analyze`) — Requires Team Membership
-
-### Run Analysis (SSE)
-
-```
-POST /api/analyze
-Content-Type: multipart/form-data
+```bash
+curl -X POST https://host/api/v1/analyze \
+  -H "Authorization: Bearer snr_…" -H "Content-Type: application/json" \
+  -d '{"name":"Suspicious RDP","audience":"soc","siem":"<alert text>","webhook_url":"https://my-soar/hook"}'
+# → { "sessionId": "…", "jobId": "…", "status": "queued" }
 ```
 
-Fields: `session_id`, `siem_input?`, `text_input?`, `logFile?` (upload), `audience`, `redacted_strings?`
+Body: `audience` (required), one of `siem` / `text` (required), optional `name`, `redacted_strings[]` (masked before analysis), `webhook_url` (POSTed on completion; HMAC-signed via `X-SNR-Signature` when `SNR_WEBHOOK_SECRET` is set).
 
-Returns an SSE event stream:
-- `event: status` — progress updates
-- `event: chunk` — streaming partial JSON
-- `event: complete` — final `AnalysisResult` JSON
-- `event: error` — error message
+### Poll status / fetch results
+| Method | Endpoint | Scope | Description |
+|---|---|---|---|
+| GET | `/api/v1/analyses/{id}` | `sessions:read` | `{ status, severity, version, … }` (`pending`→`analyzing`→`complete`/`failed`) |
+| GET | `/api/v1/analyses/{id}/result` | `sessions:read` | Structured result (409 until complete; false-positive IOCs excluded) |
+| GET | `/api/v1/analyses/{id}/export/{format}` | `export:read` | `format` = `stix` \| `navigator` \| `iocs` |
 
-### Exports
-
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| POST | `/api/analyze/export/stix` | `{ session_id, tlp }` | STIX 2.1 JSON |
-| POST | `/api/analyze/export/navigator` | `{ session_id }` | ATT&CK Navigator layer JSON |
-| POST | `/api/analyze/export/eml` | `{ session_id, audience, tlp, attach_stix?, attach_navigator?, attach_iocs?, attach_detection_rules?, diagram_jpg_b64?, email_content_overrides? }` | .eml file |
-| POST | `/api/analyze/export/zip` | `{ session_id, audience, tlp, attach_iocs?, diagram_jpg_b64?, email_content_overrides? }` | .zip archive |
-| POST | `/api/analyze/export/report` | `{ session_id, audience, tlp, email_content_overrides? }` | Markdown report |
-| POST | `/api/analyze/export/detection-rules` | `{ session_id, tlp? }` | Detection rules (.txt) |
-| POST | `/api/analyze/report-preview` | `{ session_id, audience?, tlp?, email_content_overrides? }` | Preview markdown (inline) |
-| GET | `/api/analyze/email-preview` | Query: `tlp?, audience?` | HTML email preview |
+### Completion webhook
+If `webhook_url` was supplied, SNR POSTs `{ sessionId, teamId, status, version?, error?, ts }` on terminal state. Verify authenticity with the `X-SNR-Signature: sha256=<hmac>` header (HMAC-SHA256 of the raw body using `SNR_WEBHOOK_SECRET`).
 
 ---
 
-## Settings (`/api/settings`) — Requires Team Membership
+## API key management (`/api/keys`) — admin (JWT)
 
-| Method | Endpoint | Body | Response |
-|--------|----------|------|----------|
-| GET | `/api/settings` | — | `{ settings }` (sensitive keys masked) |
-| PATCH | `/api/settings` | `{ key: value, ... }` | `{ ok }` |
-| POST | `/api/settings/logo` | Multipart: `logo` (≤500KB image) | `{ ok, dataUri }` |
-| DELETE | `/api/settings/logo` | — | `{ ok }` |
-
----
-
-## Analytics (`/api/analytics`) — Requires Team Membership
-
-| Method | Endpoint | Query | Response |
-|--------|----------|-------|----------|
-| GET | `/api/analytics` | `days?=30, all?=true` | `{ sessionsOverTime, severityDistribution, audienceBreakdown, exportActivity, iocDistribution, techniqueMap }` |
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/keys/scopes` | List valid scopes |
+| GET / POST | `/api/keys/service-accounts` | List / create service accounts |
+| PATCH | `/api/keys/service-accounts/{id}` | Enable/disable |
+| GET / POST | `/api/keys/service-accounts/{id}/keys` | List / **mint** a key (token returned **once**) |
+| POST | `/api/keys/{keyId}/revoke` | Revoke a key |
 
 ---
 
-## Rate Limits
+## Detection-as-code (`/api/publish`) — JWT, team-scoped
 
-| Scope | Limit |
-|-------|-------|
-| Login | 5 req / 15 min |
-| Token refresh | 5 req / 15 min |
-| Password change | 5 req / 1 hr |
-| All other API | 100 req / 15 min |
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/publish/status` | Whether a GitHub target is configured for the team |
+| POST | `/api/publish/{sessionId}` | Open/update a PR with the session's rules + report → `{ prUrl, prNumber, files, updated }` |
 
-## Error Format
+Configure the target in **Settings → Detection-as-Code** (`dac_github_repo`, `dac_github_branch`, `dac_github_token`, `dac_path_prefix`).
 
-All errors return `{ error: string }` with appropriate HTTP status codes.
+---
 
-## Authentication Flow
+## Threat-intel feeds (`/api/feeds`) — JWT, admin/lead
 
-1. `POST /api/auth/login` → receive `token` + `refreshToken`
-2. Include `Authorization: Bearer <token>` on all subsequent requests
-3. Include `X-Team-Id: <teamId>` for team-scoped endpoints
-4. When token expires, `POST /api/auth/refresh` with the refresh token
-5. `POST /api/auth/logout` to revoke the current token
+| Method | Endpoint | Description |
+|---|---|---|
+| GET / POST | `/api/feeds` | List / create a feed (`type` = `rss` \| `taxii` \| `misp`) |
+| PATCH / DELETE | `/api/feeds/{id}` | Update (incl. `enabled`) / delete |
+| POST | `/api/feeds/{id}/test` | Fetch items without ingesting |
+| POST | `/api/feeds/{id}/poll` | Poll now (ingests new items immediately) |
+
+Feeds are also polled automatically on their cadence (`FEED_POLL_INTERVAL_SECONDS`).
+
+---
+
+## Web/UI API (`/api`, JWT)
+
+Auth: `POST /api/auth/login` · `/refresh` · `/logout` · `GET /api/auth/me` · `PATCH /api/auth/me/password`.
+Resources (team-scoped via `X-Team-Id`): `/api/sessions`, `/api/analyze` (+ `/export/*`), `/api/settings`, `/api/analytics`, `/api/threat-actors`, `/api/search`, `/api/users`, `/api/teams`.
+
+`POST /api/analyze` and `POST /api/analyze/rerun/:id` are **Server-Sent Event** streams (events: `status`, `chunk`, `complete`, `error`) — the work runs in the background worker and the API tails its progress.

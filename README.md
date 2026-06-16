@@ -37,49 +37,52 @@ or any OpenAI-compatible endpoint) and **self-hostable** on your own infrastruct
 
 **Customize** — email **layout** + **branding** editors, a CTI **report template** editor, configurable brief sections, and per-audience prompts (all in Settings)
 
-**Enterprise** — JWT auth + RBAC (admin/analyst/viewer), team workspaces, client-side redaction, rate limiting, health/readiness probes, Prometheus `/metrics`, scheduled DB backups, and a one-command Docker/Compose deployment
+**Integrate (V3)** — a machine-authenticated **Integration API** (`/api/v1`, API keys + scopes + per-key rate limits + webhooks), **threat-intel feed ingestion** (TAXII 2.1 / MISP / RSS, scheduled, auto-analyzed), and **detection-as-code** publishing (Sigma/YARA/Suricata + report to a GitHub PR)
+
+**Enterprise (V3)** — Postgres data layer, **asynchronous analysis** (pg-boss job queue + background worker; restart-safe & concurrent), JWT auth + RBAC, team workspaces, client-side redaction, rate limiting, health/readiness probes, Prometheus `/metrics` (API + worker), scheduled `pg_dump` backups, OpenAPI spec, a Grafana dashboard, and a Docker/Compose deployment
 
 ---
 
 ## Requirements
 
-- **Local dev:** Node.js **22.5+** (uses the built-in `node:sqlite` — no native build step)
-- **Container deploy:** Docker 24+ with the Compose plugin
+- **Postgres 14+** (the V3 data store) — provided automatically by the Docker Compose stack
+- **Node.js 22.5+** (server runtime, via `tsx`) for local development
+- **Docker 24+** with the Compose plugin for the container deployment
 - **An LLM credential:** an Anthropic API key, or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, Azure OpenAI)
 
 ---
 
 ## Setup
 
-### A. Run locally (npm) — fastest for evaluation & development
+### A. Run locally (npm) — for development
 
 ```bash
-git clone <repo-url> && cd snr
+git clone <repo-url> && cd snr-v3
 npm install
 cp .env.example .env
+#   set DATABASE_URL  (postgres://user:pass@localhost:5432/snr)
 #   set ANTHROPIC_API_KEY  (or an OpenAI-compatible provider)
 #   set A2N_ADMIN_EMAIL / A2N_ADMIN_PASSWORD  (first-run admin)
-npm run dev
+npm run dev      # runs the API (3001), the worker, and the Vite client (5173)
 ```
 
-- UI: **http://localhost:5173** · API: **http://localhost:3001**
-- On first start an admin account is bootstrapped from `A2N_ADMIN_EMAIL` / `A2N_ADMIN_PASSWORD`.
+- A reachable Postgres is required (`docker run -d -e POSTGRES_PASSWORD=… -p 5432:5432 postgres:16` for a quick local one). Migrations apply automatically on first start.
+- UI: **http://localhost:5173** · API: **http://localhost:3001**. Admin is bootstrapped from `A2N_ADMIN_EMAIL` / `A2N_ADMIN_PASSWORD`.
 
 ### B. Deploy with Docker (on-prem / self-hosted)
 
 ```bash
 cp .env.example .env
-#   set JWT_SECRET, ALLOWED_ORIGINS, an LLM key, admin creds, and SNR_DOMAIN
+#   set JWT_SECRET, ALLOWED_ORIGINS, an LLM key, admin creds, POSTGRES_PASSWORD, and SNR_DOMAIN
 docker compose up -d
 ```
 
-- Serves the API + UI behind a Caddy TLS reverse proxy at **https://<SNR_DOMAIN>**
-  (`localhost` issues a self-signed cert; a real domain auto-provisions Let's Encrypt).
-- Data (SQLite DB + scheduled backups) persists in the `snr-data` volume.
-- **Full guide — TLS, secrets, backups/restore, upgrades, hardening checklist — in [DEPLOYMENT.md](./DEPLOYMENT.md).**
+- Brings up **postgres**, the **app** (API + built UI), a background **worker**, and a **Caddy** TLS reverse proxy at **https://<SNR_DOMAIN>** (`localhost` → self-signed; a real domain → auto Let's Encrypt).
+- Postgres data persists in the `snr-pgdata` volume; `pg_dump` backups in `snr-data`.
+- **Full guide — TLS, secrets, backups/restore, upgrades, scaling, hardening — in [DEPLOYMENT.md](./DEPLOYMENT.md).**
 
-> Same codebase either way: the container simply runs `npm run build` + `npm start`
-> (the production server serves the built UI). There is no separate "Docker version."
+> Migrating from a V2 (SQLite) install? `npm run migrate:sqlite -- /path/to/snr.db` imports
+> your existing data into Postgres.
 
 ---
 
@@ -105,9 +108,13 @@ Common variables (full reference in [`.env.example`](./.env.example) and [DEPLOY
 | `A2N_ADMIN_EMAIL` / `A2N_ADMIN_PASSWORD` | yes (first run) | — | Bootstrap admin (password complexity enforced). |
 | `JWT_SECRET` | prod | dev: auto | JWT signing secret. **Required in production.** |
 | `ALLOWED_ORIGINS` | prod | — | Comma-separated CORS origins. **Required in production.** |
+| `DATABASE_URL` | **yes** | — | Postgres connection string. Compose builds it from `POSTGRES_*`. |
 | `PORT` / `HOST` | no | `3001` / dev `127.0.0.1`, prod `0.0.0.0` | Listen port / bind address. |
-| `DB_PATH` | no | `./snr.db` | SQLite file (use a volume path in containers). |
-| `BACKUP_INTERVAL_HOURS` / `BACKUP_RETENTION` | no | `24` / `7` | Scheduled snapshot cadence & retention (`0` disables). |
+| `ANALYSIS_WORKER_CONCURRENCY` | no | `2` | Parallel analyses per worker process. |
+| `DB_POOL_MAX` | no | `10` | Max Postgres connections per process. |
+| `FEED_POLL_INTERVAL_SECONDS` | no | `60` | Feed scheduler tick (`0` disables). |
+| `SNR_WEBHOOK_SECRET` | no | — | If set, integration-API webhooks are HMAC-signed. |
+| `BACKUP_INTERVAL_HOURS` / `BACKUP_RETENTION` | no | `24` / `7` | Scheduled `pg_dump` cadence & retention (`0` disables). |
 | `METRICS_TOKEN` | no | — | If set, `/metrics` requires `Authorization: Bearer <token>`. |
 | `LLM_TIMEOUT` | no | `120` | Per-phase LLM timeout (seconds). |
 
@@ -120,55 +127,68 @@ mounted file — the standard container-secrets convention; the file's contents 
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Frontend + backend in dev mode |
+| `npm run dev` | API + **worker** + Vite client (concurrently) |
 | `npm run build` | Production frontend build (→ `dist/`) |
-| `npm start` | Run the server (serves API + built UI when `NODE_ENV=production`) |
-| `npm test` / `npm run test:watch` | Vitest suite |
+| `npm start` | Run the API server (serves API + built UI when `NODE_ENV=production`) |
+| `npm run worker` | Run the background analysis worker |
+| `npm test` / `npm run test:watch` | Vitest (unit; Postgres integration when `TEST_DATABASE_URL` is set) |
 | `npm run lint` / `lint:fix` | ESLint + type check / autofix |
-| `npm run format` / `format:check` | Prettier |
-| `npm run db:backup` / `db:restore` | Manual SQLite backup / restore |
+| `npm run db:backup` / `db:restore` | `pg_dump` backup / `pg_restore` restore |
+| `npm run migrate:sqlite -- <snr.db>` | One-time V2 SQLite → Postgres import |
+| `npm run check:actors` | Read-only threat-actor diagnostic |
+| `npm run loadtest -- [n] [--wait]` | Load-test the async pipeline (needs `SNR_API_KEY`) |
 
 ---
 
 ## Architecture
 
 ```
+            inbound API (/api/v1, API keys)        feeds (TAXII/MISP/RSS, scheduled)
+                         \                              /
+                          ▼                            ▼
+  Web UI ──► API (Express) ──► job queue (pg-boss on Postgres) ──► worker(s)
+                  │                                                   │ LLM analysis
+                  ▼                                                   ▼
+              Postgres  ◄──────────────── results / job_events ──────┘
+                  │
+                  └──► detection-as-code publisher ──► GitHub branch + PR (rules + report)
+
 ├── server/                 # Express.js backend (TypeScript, ESM)
-│   ├── index.ts            # entry: middleware, health/ready, /metrics, backups, graceful shutdown
-│   ├── db/database.ts      # SQLite via node:sqlite (WAL), schema + migrations
+│   ├── index.ts            # API entry: middleware, health/ready, /metrics, schedulers, shutdown
+│   ├── worker.ts           # background worker entry: consumes the analysis queue
+│   ├── db/
+│   │   ├── client.ts       # Postgres pool + async query shim + advisory lock
+│   │   ├── database.ts     # initDb, settings (cached), audit log, bootstrap
+│   │   ├── migrate.ts      # forward-only SQL migration runner
+│   │   └── migrations/     # 001 schema · 002 jobs · 003 api keys · 004 feeds · 005 dac
+│   ├── jobs/               # queue.ts (pg-boss), events.ts (SSE channel), analysis-handler.ts
 │   ├── lib/
-│   │   ├── claude.ts       # two-phase LLM orchestration, SSE streaming, schema
+│   │   ├── claude.ts       # two-phase LLM orchestration + JSON schema
 │   │   ├── providers/      # LLM provider abstraction (Anthropic / OpenAI-compatible) + retry
-│   │   ├── stix.ts         # STIX 2.1 bundle + Attack Flow extension objects
-│   │   ├── afb.ts          # Attack Flow Builder (.afb) exporter
-│   │   ├── attack-flow.ts  # Attack Flow validation / DAG repair
-│   │   ├── eml.ts          # email (.eml) builder + token-template engine
-│   │   ├── report.ts       # Markdown report + token-template engine
-│   │   ├── sections.ts     # configurable brief sections
-│   │   ├── auth-utils.ts   # JWT, password hashing, token revocation
-│   │   ├── secrets.ts      # *_FILE secret resolution
-│   │   ├── backup.ts       # scheduled VACUUM INTO snapshots + retention
-│   │   ├── metrics.ts      # Prometheus registry + counters
-│   │   └── logger.ts       # pino structured logging
-│   ├── middleware/         # auth + team scoping
-│   └── routes/             # auth, users, teams, sessions, analyze, settings, analytics, threat-actors, search
+│   │   ├── stix.ts afb.ts attack-flow.ts eml.ts report.ts sections.ts   # exporters/templates
+│   │   ├── api-keys.ts     # service accounts + API key mint/resolve/revoke
+│   │   ├── feeds/          # rss/taxii/misp connectors + ingest orchestrator + scheduler
+│   │   ├── publish/        # github.ts — detection-as-code PR publisher (Octokit)
+│   │   ├── auth-utils.ts secrets.ts backup.ts metrics.ts logger.ts
+│   ├── middleware/         # auth.ts (JWT) + apiKey.ts (machine auth)
+│   ├── routes/             # auth, users, teams, sessions, analyze, settings, analytics,
+│   │                       #   threat-actors, search, keys, v1, feeds, publish
+│   └── openapi.json        # OpenAPI 3 spec for /api/v1
 ├── src/                    # React + Vite frontend (TypeScript)
-│   ├── components/         # AttackChainView, AttackFlowView, IOCTable, EmailTemplateEditor,
-│   │                       #   ReportTemplateEditor, ThreatActorView, SettingsModal, ReportsModal, …
-│   ├── contexts/           # auth context
-│   └── lib/                # API client, defang, templates
-├── Dockerfile, docker-compose.yml, deploy/Caddyfile, .dockerignore   # on-prem deploy
-├── .github/workflows/      # CI (typecheck/build/docker) + release (GHCR image)
-├── scripts/                # DB backup/restore utilities
-└── tests/                  # Vitest
+│   └── components/         # …, AdminPanel (Users/Teams/API Keys/Feeds tabs), SettingsModal, RightPanel
+├── Dockerfile, docker-compose.yml (postgres + app + worker + caddy), deploy/   # on-prem deploy
+├── deploy/grafana-dashboard.json   # Prometheus/Grafana ops dashboard
+├── .github/workflows/      # CI (tsc/lint/test+postgres/build/docker) + release (GHCR)
+├── scripts/                # backup/restore, sqlite→postgres migration, loadtest, diagnostics
+└── tests/                  # Vitest (unit + Postgres integration)
 ```
 
 ---
 
 ## Operations & security
 
-- **Probes:** `GET /api/health` (liveness) and `GET /api/ready` (DB read/write). **Metrics:** Prometheus at `GET /metrics`.
-- **Backups:** consistent `VACUUM INTO` snapshots on a schedule, with retention (see DEPLOYMENT.md for restore).
+- **Probes:** `GET /api/health` (liveness) and `GET /api/ready` (DB read/write). **Metrics:** Prometheus at `GET /metrics` (API) and the worker's own port; import [deploy/grafana-dashboard.json](./deploy/grafana-dashboard.json).
+- **Backups:** scheduled `pg_dump` snapshots with retention (see DEPLOYMENT.md for restore).
 - **Logs:** structured JSON on stdout with secret redaction — ship to your SIEM.
 - **Hardening:** Helmet (CSP/HSTS), account lockout, timing-safe auth, prompt-injection defense, client-side redaction, token revocation, rate limiting. The server binds to loopback in dev and `0.0.0.0` in production/containers (front it with TLS). Details in [SECURITY.md](./SECURITY.md).
 

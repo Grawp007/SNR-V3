@@ -9,6 +9,20 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: snr
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: snr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U snr -d snr_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,7 +36,12 @@ jobs:
       - name: Lint (advisory — pre-existing debt; does not block)
         run: npx eslint . || true
         continue-on-error: true
+      - name: Test (unit + Postgres integration)
+        run: npm test
+        env:
+          TEST_DATABASE_URL: postgres://snr:ci@localhost:5432/snr_test
+          JWT_SECRET: ci-test-secret
       - name: Build frontend
         run: npm run build
       - name: Docker build (smoke)
-        run: docker build -t snr:ci .
+        run: docker build -t snr-v3:ci .
