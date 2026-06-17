@@ -68,9 +68,18 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-snr}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-snr}
       BACKUP_DIR: /data/backups
+      WORKER_METRICS_PORT: "9091"
       # ANALYSIS_WORKER_CONCURRENCY: "2"   # parallel analyses per worker
     volumes:
       - snr-data:/data
+    # The worker doesn't serve the API, so override the image's API healthcheck
+    # with its own /healthz (served on WORKER_METRICS_PORT).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9091/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   caddy:
     image: caddy:2

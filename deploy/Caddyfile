@@ -6,18 +6,28 @@
 #   your domain and `tls /path/cert.pem /path/key.pem`.
 {$SNR_DOMAIN} {
 	encode gzip
+
+	# Never expose Prometheus metrics at the public edge — scrape app:3001 and
+	# worker:9091 over the internal Docker network instead.
+	@metrics path /metrics
+	handle @metrics {
+		respond 403
+	}
+
 	# Forward real client IP / proto so the app (TRUST_PROXY=1) logs and
 	# rate-limits correctly. Caddy sets X-Forwarded-For/Proto by default.
 	#
 	# Dynamic upstream: re-resolve "app" via Docker's embedded DNS (127.0.0.11)
 	# every few seconds so a container restart (new IP) is picked up
 	# automatically — no need to bounce Caddy after `docker compose restart app`.
-	reverse_proxy {
-		dynamic a {
-			name app
-			port 3001
-			refresh 5s
-			resolvers 127.0.0.11
+	handle {
+		reverse_proxy {
+			dynamic a {
+				name app
+				port 3001
+				refresh 5s
+				resolvers 127.0.0.11
+			}
 		}
 	}
 }
