@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, Save, Settings, Mail, User, Building2, ChevronDown, ChevronRight, Info, Brain, Users, Eye, Code2, Pencil, Plus, Trash2, FileText, LayoutList, Server, GitPullRequest } from 'lucide-react';
+import { X, Save, Settings, Mail, User, Building2, ChevronDown, ChevronRight, Info, Brain, Users, Eye, Code2, Pencil, Plus, Trash2, FileText, LayoutList, Server, GitPullRequest, Sparkles } from 'lucide-react';
 import ReportTemplateEditor from './ReportTemplateEditor';
-import EmailTemplateEditor from './EmailTemplateEditor';
 import SectionsEditor from './SectionsEditor';
 import ConfirmDialog from './ConfirmDialog';
 import { Button } from './ui/button';
@@ -10,48 +9,12 @@ import * as api from '@/lib/api';
 import type { CustomAudience, BriefSection } from '@/types';
 import { parseSections } from '@/lib/sections';
 
-/** Resize an image file to fit within maxW x maxH, preserving aspect ratio. SVGs pass through unchanged. */
-async function resizeLogoFile(file: File, maxW: number, maxH: number): Promise<File> {
-  // SVGs don't need resizing
-  if (file.type === 'image/svg+xml') return file;
-
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      let { width, height } = img;
-      // Only resize if larger than target
-      if (width <= maxW && height <= maxH) {
-        resolve(file);
-        return;
-      }
-      const ratio = Math.min(maxW / width, maxH / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) { reject(new Error('Failed to resize image')); return; }
-          resolve(new File([blob], file.name, { type: 'image/png' }));
-        },
-        'image/png',
-      );
-    };
-    img.onerror = () => reject(new Error('Failed to load image'));
-    img.src = URL.createObjectURL(file);
-  });
-}
-
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
-type Section = 'llm_provider' | 'identity' | 'email_template' | 'email_layout' | 'brief_sections' | 'cc_lists' | 'audience_intros' | 'audience_prompts' | 'report_template' | 'detection_as_code';
+type Section = 'llm_provider' | 'identity' | 'brief_sections' | 'cc_lists' | 'audience_intros' | 'audience_prompts' | 'report_template' | 'detection_as_code';
 
 const AUDIENCE_KEYS = [
   { key: 'purple_team', label: 'Purple Team' },
@@ -162,15 +125,6 @@ Structure the brief as an intelligence document:
 - References: cite all source reports, feeds, and CVEs used
 - Distribution Information: state TLP handling and authorized recipients`;
 
-const SECTION_TOGGLES = [
-  { key: 'email_show_observations',    label: 'What We Observed',         desc: 'Bulleted observation list from the incident' },
-  { key: 'email_show_techniques',      label: 'ATT&CK Techniques Table',  desc: 'MITRE ATT&CK technique IDs, names, and evidence' },
-  { key: 'email_show_affected_assets', label: 'Affected Assets',          desc: 'Impacted hosts, accounts, and systems' },
-  { key: 'email_show_actions',         label: 'Recommended Actions',      desc: 'Numbered action items tailored to the audience' },
-  { key: 'email_show_iocs',            label: 'Indicators of Compromise', desc: 'IOC table with type badges and context' },
-  { key: 'email_show_next_steps',      label: 'Next Steps / Ownership',   desc: 'Handoff and ownership instructions' },
-];
-
 export default function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -183,11 +137,8 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [addingAudience, setAddingAudience] = useState(false);
   const [newAudienceName, setNewAudienceName] = useState('');
   const [newAudiencePrompt, setNewAudiencePrompt] = useState('');
-  const [previewHtml, setPreviewHtml] = useState('');
-  const [previewLoading, setPreviewLoading] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaModelsLoading, setOllamaModelsLoading] = useState(false);
-  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const today = new Date().toISOString().split('T')[0];
 
   useEffect(() => {
@@ -202,57 +153,6 @@ export default function SettingsModal({ open, onClose }: Props) {
       .then((s) => { setSettings(s); setLoading(false); })
       .catch(() => setLoading(false));
   }, [open]);
-
-  // Debounced email preview loader — fires when the email_template section is open
-  // and any of the 6 section toggle settings change
-  useEffect(() => {
-    if (openSection !== 'email_template') return;
-    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
-    previewDebounceRef.current = setTimeout(async () => {
-      setPreviewLoading(true);
-      try {
-        const html = await api.fetchEmailPreview({
-          showObservations:   settings['email_show_observations']    !== 'false',
-          showTechniques:     settings['email_show_techniques']      !== 'false',
-          showAffectedAssets: settings['email_show_affected_assets'] !== 'false',
-          showActions:        settings['email_show_actions']         !== 'false',
-          showIocs:           settings['email_show_iocs']            !== 'false',
-          showNextSteps:      settings['email_show_next_steps']      !== 'false',
-        });
-        setPreviewHtml(html);
-      } catch { /* silently ignore preview errors */ } finally {
-        setPreviewLoading(false);
-      }
-    }, 600);
-    return () => { if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    openSection,
-    settings['email_show_observations'],
-    settings['email_show_techniques'],
-    settings['email_show_affected_assets'],
-    settings['email_show_actions'],
-    settings['email_show_iocs'],
-    settings['email_show_next_steps'],
-  ]);
-
-  // Debounced preview for the Email Template (layout) section — renders the
-  // in-progress template so the analyst sees the layout update as they edit.
-  useEffect(() => {
-    if (openSection !== 'email_layout') return;
-    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
-    previewDebounceRef.current = setTimeout(async () => {
-      setPreviewLoading(true);
-      try {
-        const html = await api.fetchEmailTemplatePreview({ template: settings['email_template'] ?? '' });
-        setPreviewHtml(html);
-      } catch { /* silently ignore preview errors */ } finally {
-        setPreviewLoading(false);
-      }
-    }, 600);
-    return () => { if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openSection, settings['email_template']]);
 
   // Fetch available models from OpenAI-compatible endpoint
   useEffect(() => {
@@ -532,119 +432,21 @@ export default function SettingsModal({ open, onClose }: Props) {
               </div>
             </Accordion>
 
-            {/* ── Branding ── */}
-            <SectionCard icon={<Building2 className="w-3.5 h-3.5" />} label="Email Branding">
-              <p className="text-xs text-muted-foreground mb-4">
-                Customize the colors and logo used in exported email briefs (.eml).
+            {/* ── Email design → moved to Email Studio ── */}
+            <SectionCard icon={<Sparkles className="w-3.5 h-3.5" />} label="Email Branding & Templates">
+              <p className="text-xs text-muted-foreground mb-3">
+                Email design now lives in <strong className="text-foreground/80">Email Studio</strong> — a live,
+                full-screen editor with the rendered brief beside the controls. It consolidates everything that
+                used to be split across these settings:
               </p>
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] text-muted-foreground uppercase tracking-wide block mb-1">Primary Color</label>
-                    <p className="text-[9px] text-muted-foreground/60 mb-1.5">Section accent bars, bullet colors, technique IDs</p>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={settings['email_primary_color'] || '#1d4ed8'}
-                        onChange={(e) => set('email_primary_color', e.target.value)}
-                        className="w-8 h-8 rounded border border-border cursor-pointer bg-transparent"
-                      />
-                      <input
-                        type="text"
-                        value={settings['email_primary_color'] || '#1d4ed8'}
-                        onChange={(e) => set('email_primary_color', e.target.value)}
-                        className="flex-1 bg-secondary/50 border border-border rounded-md px-2 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                        placeholder="#1d4ed8"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-muted-foreground uppercase tracking-wide block mb-1">Secondary Color</label>
-                    <p className="text-[9px] text-muted-foreground/60 mb-1.5">Header/footer background, numbered list headers</p>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={settings['email_secondary_color'] || '#0a0f1e'}
-                        onChange={(e) => set('email_secondary_color', e.target.value)}
-                        className="w-8 h-8 rounded border border-border cursor-pointer bg-transparent"
-                      />
-                      <input
-                        type="text"
-                        value={settings['email_secondary_color'] || '#0a0f1e'}
-                        onChange={(e) => set('email_secondary_color', e.target.value)}
-                        className="flex-1 bg-secondary/50 border border-border rounded-md px-2 py-1 text-xs text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                        placeholder="#0a0f1e"
-                      />
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] text-muted-foreground uppercase tracking-wide block mb-1">Font Family</label>
-                    <p className="text-[9px] text-muted-foreground/60 mb-1.5">Body text font (email-safe fonts only)</p>
-                    <select
-                      value={settings['email_font_family'] || 'Arial'}
-                      onChange={(e) => set('email_font_family', e.target.value)}
-                      className="w-full bg-secondary/50 border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                    >
-                      {['Arial', 'Georgia', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Times New Roman'].map((f) => (
-                        <option key={f} value={f}>{f}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-muted-foreground uppercase tracking-wide block mb-1">Body Font Size</label>
-                    <p className="text-[9px] text-muted-foreground/60 mb-1.5">Paragraph and list text size</p>
-                    <select
-                      value={settings['email_body_font_size'] || '14'}
-                      onChange={(e) => set('email_body_font_size', e.target.value)}
-                      className="w-full bg-secondary/50 border border-border rounded-md px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                    >
-                      {['12', '13', '14', '15', '16'].map((s) => (
-                        <option key={s} value={s}>{s}px{s === '14' ? ' (default)' : ''}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] text-muted-foreground uppercase tracking-wide block mb-1">Logo</label>
-                  <p className="text-[9px] text-muted-foreground/60 mb-1.5">Small logo in the upper-left of the email header (max 500 KB, PNG/JPG/SVG)</p>
-                  {settings['email_logo_data'] ? (
-                    <div className="flex items-center gap-3">
-                      <img src={settings['email_logo_data']} alt="Logo preview" className="h-10 max-w-[120px] rounded border border-border bg-white p-1 object-contain" />
-                      <button
-                        onClick={async () => {
-                          await api.deleteLogo();
-                          set('email_logo_data', '');
-                        }}
-                        className="text-[10px] text-red-400 hover:text-red-300 border border-red-400/30 rounded px-2 py-0.5"
-                      >
-                        <Trash2 className="w-3 h-3 inline mr-1" />Remove
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="inline-flex items-center gap-1.5 text-[10px] text-cyan-400 hover:text-cyan-300 border border-cyan-400/30 rounded px-2 py-1 cursor-pointer">
-                      <Plus className="w-3 h-3" />Upload Logo
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/svg+xml,image/gif,image/webp"
-                        className="hidden"
-                        onChange={async (e) => {
-                          const file = e.target.files?.[0];
-                          if (!file) return;
-                          try {
-                            // Resize to max 240x80 before uploading
-                            const resized = await resizeLogoFile(file, 480, 160);
-                            const dataUri = await api.uploadLogo(resized);
-                            set('email_logo_data', dataUri);
-                          } catch (err) {
-                            setSaveError(err instanceof Error ? err.message : 'Logo upload failed');
-                          }
-                        }}
-                      />
-                    </label>
-                  )}
-                </div>
+              <ul className="text-xs text-muted-foreground/80 space-y-1.5 mb-3 list-disc pl-4">
+                <li><strong className="text-foreground/70">Colors, fonts &amp; logo</strong>, header title/subtitle, preamble, signature &amp; footer</li>
+                <li><strong className="text-foreground/70">Body layout</strong> — the section template with <span className="font-mono text-[10px]">{'{{BLOCK}}'}</span>/<span className="font-mono text-[10px]">{'{field}'}</span> tokens</li>
+                <li><strong className="text-foreground/70">Brand profiles</strong> — reusable per-client white-label themes + sender identity (From / Reply-To / CC / BCC / preheader / subject), selectable per session</li>
+              </ul>
+              <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground bg-navy-900/50 rounded p-2 border border-border/50">
+                <Info className="w-3 h-3 mt-0.5 flex-shrink-0 text-cyan-500/70" />
+                <span>Open Email Studio from the <strong className="text-foreground/70">Email</strong> tab of any analyzed session (the <em>Email Studio</em> button). Changes there save to the same team-wide defaults, so they apply across all sessions and exports.</span>
               </div>
             </SectionCard>
 
@@ -758,134 +560,6 @@ export default function SettingsModal({ open, onClose }: Props) {
                 />
               </div>
             </SectionCard>
-
-            {/* ── Email Template (body layout editor) ── */}
-            <Accordion
-              id="email_layout"
-              label="Email Template"
-              icon={<LayoutList className="w-3.5 h-3.5" />}
-              open={openSection === 'email_layout'}
-              onToggle={() => toggle('email_layout')}
-            >
-              <p className="text-xs text-muted-foreground mb-3">
-                Controls the email <strong className="text-foreground/70">body layout</strong> — which sections appear, their order, and any custom text between them. Use <span className="token-chip-block font-mono text-[10px]">{'{{BLOCK}}'}</span> tokens for generated content and <span className="token-chip-field font-mono text-[10px]">{'{field}'}</span> tokens for inline values. Leave at the default to keep the current layout. Header, colors, logo, and footer are set in <strong className="text-foreground/70">Email Branding</strong>.
-              </p>
-              <EmailTemplateEditor
-                value={settings['email_template'] ?? ''}
-                onChange={(v) => set('email_template', v)}
-                sections={briefSections}
-              />
-
-              {/* Live Preview */}
-              <div className="mt-5 pt-4 border-t border-border">
-                <div className="flex items-center gap-2 mb-3">
-                  <p className="text-xs font-semibold text-foreground/60 uppercase tracking-widest">Live Preview</p>
-                  {previewLoading && <span className="text-xs text-cyan-400 animate-pulse">Refreshing…</span>}
-                  <span className="text-xs text-muted-foreground ml-auto">Sample data — updates as you edit</span>
-                </div>
-                {previewHtml ? (
-                  <iframe
-                    srcDoc={previewHtml}
-                    sandbox="allow-same-origin"
-                    title="Email Template Preview"
-                    style={{ width: '100%', height: 500, border: 'none', borderRadius: 6 }}
-                    className="border border-border"
-                  />
-                ) : (
-                  <div className="flex items-center justify-center rounded border border-dashed border-border text-xs text-muted-foreground" style={{ height: 120 }}>
-                    {previewLoading ? 'Loading preview…' : 'Preview loads when this section is open'}
-                  </div>
-                )}
-              </div>
-            </Accordion>
-
-            {/* ── Email Branding ── */}
-            <Accordion
-              id="email_template"
-              label="Email Branding"
-              icon={<Mail className="w-3.5 h-3.5" />}
-              open={openSection === 'email_template'}
-              onToggle={() => toggle('email_template')}
-            >
-              <div className="space-y-3">
-                <EditableField
-                  label="Email Header Title"
-                  help="Large text shown in the dark header band of every email"
-                  value={settings['email_header_text'] ?? ''}
-                  onChange={(v) => set('email_header_text', v)}
-                  isEditing={editingFields.has('email_header_text')}
-                  onToggleEdit={() => toggleEdit('email_header_text')}
-                  placeholder="ALERT TO NARRATIVE"
-                  singleLine
-                />
-                <EditableField
-                  label="Custom Preamble"
-                  help="Optional paragraph inserted before the AI-generated summary. Use for org-specific legal or classification language."
-                  value={settings['email_custom_preamble'] ?? ''}
-                  onChange={(v) => set('email_custom_preamble', v)}
-                  isEditing={editingFields.has('email_custom_preamble')}
-                  onToggleEdit={() => toggleEdit('email_custom_preamble')}
-                  placeholder="e.g. This message is intended only for authorised recipients…"
-                  rows={2}
-                />
-                <EditableField
-                  label="Signature Block"
-                  help="Appended after the Next Steps section in every email"
-                  value={settings['email_signature'] ?? ''}
-                  onChange={(v) => set('email_signature', v)}
-                  isEditing={editingFields.has('email_signature')}
-                  onToggleEdit={() => toggleEdit('email_signature')}
-                  placeholder={'e.g. — CTI Team\nSecurity Operations | Shift Lead: on-call@org.com'}
-                  rows={3}
-                />
-                <EditableField
-                  label="Footer Text"
-                  help="Small text shown at the very bottom of the email (handling instructions, disclaimers)"
-                  value={settings['email_footer_text'] ?? ''}
-                  onChange={(v) => set('email_footer_text', v)}
-                  isEditing={editingFields.has('email_footer_text')}
-                  onToggleEdit={() => toggleEdit('email_footer_text')}
-                  placeholder="Handle per your organization's data classification policy."
-                  rows={2}
-                />
-              </div>
-
-              {/* ── Section Visibility (legacy — now managed via Brief Sections) ── */}
-              <div className="mt-5 pt-4 border-t border-border">
-                <p className="text-xs text-muted-foreground/60 italic">
-                  Section visibility is now managed in the{' '}
-                  <button
-                    className="text-cyan-400/80 hover:text-cyan-400 underline"
-                    onClick={() => toggle('brief_sections')}
-                  >
-                    Brief Sections
-                  </button>{' '}
-                  panel below.
-                </p>
-              </div>
-
-              {/* ── Live Preview ── */}
-              <div className="mt-5 pt-4 border-t border-border">
-                <div className="flex items-center gap-2 mb-3">
-                  <p className="text-xs font-semibold text-foreground/60 uppercase tracking-widest">Live Preview</p>
-                  {previewLoading && <span className="text-xs text-cyan-400 animate-pulse">Refreshing…</span>}
-                  <span className="text-xs text-muted-foreground ml-auto">Sample data — updates as you toggle sections</span>
-                </div>
-                {previewHtml ? (
-                  <iframe
-                    srcDoc={previewHtml}
-                    sandbox="allow-same-origin"
-                    title="Email Preview"
-                    style={{ width: '100%', height: 500, border: 'none', borderRadius: 6 }}
-                    className="border border-border"
-                  />
-                ) : (
-                  <div className="flex items-center justify-center rounded border border-dashed border-border text-xs text-muted-foreground" style={{ height: 120 }}>
-                    {previewLoading ? 'Loading preview…' : 'Preview loads when this section is open'}
-                  </div>
-                )}
-              </div>
-            </Accordion>
 
             {/* ── Brief Sections ── */}
             <Accordion
