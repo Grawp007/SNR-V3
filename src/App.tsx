@@ -318,6 +318,12 @@ function AppMain() {
     }
   }, [activeSessionId, loadSessions, showToast]);
 
+  const handleRestoreSession = useCallback(async (id: string) => {
+    await api.restoreSession(id);
+    await loadSessions();
+    showToast('Session restored', 'success');
+  }, [loadSessions, showToast]);
+
   const handleRenameSession = useCallback(async (id: string, name: string) => {
     try {
       await api.updateSessionName(id, name);
@@ -666,6 +672,7 @@ function AppMain() {
           onClose={() => setReportsOpen(false)}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}
+          onRestoreSession={handleRestoreSession}
         />
         <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
         <ChangePasswordModal open={changePasswordOpen} onClose={() => setChangePasswordOpen(false)} />

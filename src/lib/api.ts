@@ -526,6 +526,14 @@ export async function restoreSession(id: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to restore session');
 }
 
+/** List soft-deleted sessions still within the 7-day retention window. */
+export async function fetchDeletedSessions(): Promise<Array<Session & { deleted_at: number }>> {
+  const res = await authFetch(`${BASE}/sessions/deleted`);
+  if (!res.ok) throw new Error('Failed to load deleted sessions');
+  const data = await res.json() as { sessions: Array<Session & { deleted_at: number }> };
+  return data.sessions;
+}
+
 export async function bulkDeleteSessions(sessionIds: string[]): Promise<{ deleted: number; errors: string[] }> {
   const res = await authFetch(`${BASE}/sessions/bulk-delete`, {
     method: 'POST',

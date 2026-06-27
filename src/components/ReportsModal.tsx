@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, BarChart2, ChevronLeft, ChevronRight, ExternalLink, Activity, Search, TrendingUp, Trash2 } from 'lucide-react';
+import { X, BarChart2, ChevronLeft, ChevronRight, ExternalLink, Activity, Search, TrendingUp, Trash2, RotateCcw } from 'lucide-react';
 import AnalyticsTab from './AnalyticsTab';
 import ConfirmDialog from './ConfirmDialog';
 import { Button } from './ui/button';
@@ -16,6 +16,8 @@ interface Props {
   onSelectSession: (id: string) => void;
   /** Delete a session (soft delete with undo) — reuses the app-level handler/toast. */
   onDeleteSession: (id: string) => Promise<void> | void;
+  /** Restore a soft-deleted session — reuses the app-level handler/toast. */
+  onRestoreSession: (id: string) => Promise<void> | void;
 }
 
 const PAGE_SIZE = 15;
@@ -38,7 +40,7 @@ const ACTION_COLORS: Record<string, string> = {
   export_zip: 'text-yellow-400',
 };
 
-export default function ReportsModal({ open, onClose, onSelectSession, onDeleteSession }: Props) {
+export default function ReportsModal({ open, onClose, onSelectSession, onDeleteSession, onRestoreSession }: Props) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [total, setTotal] = useState(0);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
@@ -48,6 +50,9 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
   const [searchQuery, setSearchQuery] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deletedSessions, setDeletedSessions] = useState<Array<Session & { deleted_at: number }>>([]);
+  const [deletedLoading, setDeletedLoading] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
 
   const loadSessions = useCallback(async (p: number) => {
     setLoading(true);
@@ -74,6 +79,17 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
     }
   }, []);
 
+  const loadDeleted = useCallback(async () => {
+    setDeletedLoading(true);
+    try {
+      setDeletedSessions(await api.fetchDeletedSessions());
+    } catch {
+      // non-critical
+    } finally {
+      setDeletedLoading(false);
+    }
+  }, []);
+
   const handleConfirmDelete = useCallback(async () => {
     if (!confirmDelete) return;
     setDeleting(true);
@@ -84,19 +100,32 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
       if (nextPage !== page) setPage(nextPage);
       else await loadSessions(page);
       await loadAudit();
+      await loadDeleted();
     } finally {
       setDeleting(false);
       setConfirmDelete(null);
     }
-  }, [confirmDelete, onDeleteSession, sessions.length, page, loadSessions, loadAudit]);
+  }, [confirmDelete, onDeleteSession, sessions.length, page, loadSessions, loadAudit, loadDeleted]);
+
+  const handleRestore = useCallback(async (id: string) => {
+    setRestoringId(id);
+    try {
+      await onRestoreSession(id);
+      await loadDeleted();
+      await loadSessions(page);
+    } finally {
+      setRestoringId(null);
+    }
+  }, [onRestoreSession, loadDeleted, loadSessions, page]);
 
   useEffect(() => {
     if (!open) return;
     loadSessions(0);
     loadAudit();
+    loadDeleted();
     setPage(0);
     setSearchQuery('');
-  }, [open, loadSessions, loadAudit]);
+  }, [open, loadSessions, loadAudit, loadDeleted]);
 
   useEffect(() => {
     if (!open) return;
@@ -172,6 +201,12 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
                 </TabsTrigger>
                 <TabsTrigger value="sessions" className="text-xs gap-1.5">
                   <ExternalLink className="w-3 h-3" />Session History
+                </TabsTrigger>
+                <TabsTrigger value="deleted" className="text-xs gap-1.5">
+                  <RotateCcw className="w-3 h-3" />Recently Deleted
+                  {deletedSessions.length > 0 && (
+                    <span className="ml-0.5 text-[9px] bg-secondary/80 text-muted-foreground px-1 py-0 rounded-full">{deletedSessions.length}</span>
+                  )}
                 </TabsTrigger>
                 <TabsTrigger value="audit" className="text-xs gap-1.5">
                   <Activity className="w-3 h-3" />Audit Trail
@@ -298,6 +333,58 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
               )}
             </TabsContent>
 
+            {/* ── Recently Deleted Tab ── */}
+            <TabsContent value="deleted" className="flex-1 flex flex-col px-5 pb-4 mt-3 overflow-hidden data-[state=inactive]:!hidden">
+              <p className="text-[11px] text-muted-foreground mb-3 flex-shrink-0">
+                Sessions are soft-deleted and recoverable here for <strong className="text-foreground/70">7 days</strong>, after which they're permanently purged.
+              </p>
+              <div className="flex-1 overflow-y-auto">
+                {deletedLoading ? (
+                  <div className="text-center text-muted-foreground text-xs py-12">Loading…</div>
+                ) : deletedSessions.length === 0 ? (
+                  <div className="text-center text-muted-foreground text-xs py-12">No recently deleted sessions.</div>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-navy-800">
+                      <tr className="border-b border-border text-muted-foreground text-[10px] uppercase tracking-wide">
+                        <th className="text-left py-2 pr-3 font-medium">Session Name</th>
+                        <th className="text-left py-2 pr-3 font-medium w-28">Deleted</th>
+                        <th className="text-left py-2 pr-3 font-medium w-24">Severity</th>
+                        <th className="text-right py-2 font-medium w-24">Restore</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {deletedSessions.map((s) => (
+                        <tr key={s.id} className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
+                          <td className="py-2.5 pr-3 font-medium text-foreground">{s.name}</td>
+                          <td className="py-2.5 pr-3 text-muted-foreground">{formatTimestamp(s.deleted_at)}</td>
+                          <td className="py-2.5 pr-3">
+                            {s.severity ? (
+                              <div className="flex items-center gap-1.5">
+                                <div className={cn('w-1.5 h-1.5 rounded-full', severityDot(s.severity))} />
+                                <span className="text-muted-foreground">{s.severity}</span>
+                              </div>
+                            ) : <span className="text-muted-foreground/40">—</span>}
+                          </td>
+                          <td className="py-2.5 text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 text-[10px] gap-1 text-cyan-400 hover:text-cyan-300"
+                              disabled={restoringId === s.id}
+                              onClick={() => handleRestore(s.id)}
+                            >
+                              <RotateCcw className="w-3 h-3" />{restoringId === s.id ? 'Restoring…' : 'Restore'}
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </TabsContent>
+
             {/* ── Audit Trail Tab ── */}
             <TabsContent value="audit" className="flex-1 overflow-y-auto px-5 pb-4 mt-3">
               {auditLoading ? (
@@ -346,7 +433,7 @@ export default function ReportsModal({ open, onClose, onSelectSession, onDeleteS
       <ConfirmDialog
         open={!!confirmDelete}
         title="Delete session?"
-        message={`Delete "${confirmDelete?.name ?? ''}"? It can be restored from the Undo toast for 7 days.`}
+        message={`Delete "${confirmDelete?.name ?? ''}"? You can Undo right after, or restore it from the Recently Deleted tab for 7 days.`}
         confirmLabel={deleting ? 'Deleting…' : 'Delete'}
         danger
         onConfirm={handleConfirmDelete}

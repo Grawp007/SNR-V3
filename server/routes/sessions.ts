@@ -97,6 +97,33 @@ router.get('/', async (req: Request, res: Response) => {
   res.json({ sessions, total, limit, offset });
 });
 
+// GET /api/sessions/deleted — soft-deleted sessions still within the 7-day
+// retention window (most recent first). Defined before /:id to avoid shadowing.
+router.get('/deleted', async (req: Request, res: Response) => {
+  const authReq = req as AuthenticatedRequest;
+  const db = getDb();
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const conditions: string[] = ['s.deleted_at IS NOT NULL', 's.deleted_at >= ?'];
+  const params: unknown[] = [cutoff];
+  if (authReq.teamId) {
+    conditions.push('s.team_id = ?');
+    params.push(authReq.teamId);
+  }
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+  const sessions = await db.prepare(`
+    SELECT s.id, s.name, s.incident_id, s.created_at, s.updated_at, s.deleted_at,
+           s.severity, s.audience, s.version, s.status, s.tags
+    FROM sessions s
+    ${whereClause}
+    ORDER BY s.deleted_at DESC
+    LIMIT 200
+  `).all(...params);
+
+  res.json({ sessions });
+});
+
 // GET /api/sessions/audit/log — audit log (must be before /:id to avoid shadowing)
 router.get('/audit/log', async (req: Request, res: Response) => {
   const authReq = req as AuthenticatedRequest;
